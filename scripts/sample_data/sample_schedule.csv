@@ -1,0 +1,5 @@
+activity_id,name,start,finish,baseline_start,baseline_finish,percent_complete,predecessors
+A100,Notice to Proceed,2026-03-01,2026-03-01,2026-03-01,2026-03-01,100,
+A200,Mobilization,2026-03-02,2026-03-06,2026-03-02,2026-03-05,50,A100
+A300,Foundations,2026-03-07,2026-03-21,2026-03-06,2026-03-20,10,A200
+A400,Structural Steel,2026-03-22,2026-04-15,2026-03-21,2026-04-10,0,A300

@@ -1,0 +1,40 @@
+services:
+  db:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: cpi
+    ports:
+      - "5432:5432"
+    volumes:
+      - cpi_db:/var/lib/postgresql/data
+
+  backend:
+    build:
+      context: ./backend
+    env_file:
+      - ./.env
+    environment:
+      # override in container
+      STORAGE_PATH: /app/storage
+    depends_on:
+      - db
+    ports:
+      - "8000:8000"
+    volumes:
+      - cpi_storage:/app/storage
+
+  frontend:
+    build:
+      context: ./frontend
+      args:
+        VITE_API_BASE_URL: http://localhost:8000/api/v1
+    depends_on:
+      - backend
+    ports:
+      - "5173:80"
+
+volumes:
+  cpi_db:
+  cpi_storage:

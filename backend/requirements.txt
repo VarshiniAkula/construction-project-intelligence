@@ -1,0 +1,28 @@
+fastapi>=0.110,<1.0
+uvicorn[standard]>=0.27
+sqlalchemy>=2.0
+pydantic>=2.6
+pydantic-settings>=2.2
+python-jose[cryptography]>=3.3
+passlib[bcrypt]>=1.7
+python-multipart>=0.0.9
+psycopg[binary]>=3.1
+aiofiles>=23.2
+
+# file parsing
+pypdf>=4.0
+python-docx>=1.1
+
+# optional encryption at rest for uploaded files
+cryptography>=42.0
+
+# retrieval
+numpy>=1.24
+scikit-learn>=1.3
+
+# optional: OpenAI (only used if OPENAI_API_KEY is set)
+openai>=1.30
+
+# tests
+pytest>=7.4
+httpx>=0.27

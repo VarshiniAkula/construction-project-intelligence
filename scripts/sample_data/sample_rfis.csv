@@ -1,0 +1,4 @@
+rfi_number,title,question,status
+RFI-001,Door hardware ambiguity,Please clarify lever set type at Room 102 per A-101 and Spec 087100. Current note conflicts with schedule.,Open
+RFI-002,Ceiling height conflict,Reflected ceiling plan shows 9'-0" but section indicates 10'-0". Confirm ceiling elevation at Grid A-3.,Open
+RFI-003,Fire sprinkler head coordination,Confirm sprinkler head locations to avoid conflict with ductwork shown on M-201.,Open

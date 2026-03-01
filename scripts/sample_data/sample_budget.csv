@@ -1,0 +1,5 @@
+cost_code,description,baseline_cost,actual_cost,committed_cost
+03-3000,Cast-in-Place Concrete,250000,20000,180000
+05-1200,Structural Steel,400000,0,350000
+09-2900,Gypsum Board,120000,0,80000
+26-0500,Common Work Results - Electrical,90000,0,60000
