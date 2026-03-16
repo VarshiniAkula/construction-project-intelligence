@@ -1,0 +1,58 @@
+# Dependencies
+node_modules/
+.venv/
+*.egg-info/
+
+# Build output
+.next/
+dist/
+__pycache__/
+*.pyc
+
+# Environment & secrets
+.env
+.env.local
+.env.*.local
+*.key
+*.pem
+*.p12
+*.crt
+*.secret
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Databases
+*.db
+*.sqlite
+*.sqlite3
+
+# Data & storage
+data/DATASETS/
+storage/
+backend/storage/
+
+# Legacy code
+_legacy/
+
+# Infrastructure data
+minio_data/
+pgdata/
+qdrant_data/
+
+# Testing
+.pytest_cache/
+htmlcov/
+.coverage
+test-results/
+playwright-report/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Logs
+*.log
