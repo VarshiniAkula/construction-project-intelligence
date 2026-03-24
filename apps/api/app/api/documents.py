@@ -1,19 +1,16 @@
 import os
+import io
+import uuid
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, UploadFile, File, Form, Query
 from fastapi.responses import StreamingResponse
-from sqlalchemy import select, func
-from sqlalchemy.ext.asyncio import AsyncSession
-import io
+from supabase._async.client import AsyncClient
 
-from app.deps import get_db, get_current_user, get_project_membership
-from app.models.user import User
-from app.models.membership import ProjectMembership
-from app.models.document import Document, DocumentPage
+from app.deps import get_sb, get_current_user, get_project_membership
 from app.schemas.document import DocumentResponse, DocumentDetailResponse, PageResponse
-from app.services.storage import upload_file, download_file, get_presigned_url
+from app.services.storage import upload_file, download_file
 from app.services.audit_service import log_action
-from app.rbac.filters import build_document_sql_filter
-from shared.roles import ProjectRole, ROLE_PERMISSIONS
+from app.rbac.filters import get_allowed_scopes
+from app.shared_roles import ProjectRole, ROLE_PERMISSIONS
 
 router = APIRouter()
 
@@ -28,37 +25,55 @@ async def list_documents(
     trade_scope: str | None = Query(None),
     status: str | None = Query(None),
     search: str | None = Query(None),
-    membership: ProjectMembership = Depends(get_project_membership),
-    db: AsyncSession = Depends(get_db),
+    membership=Depends(get_project_membership),
+    sb: AsyncClient = Depends(get_sb),
 ):
-    query = select(Document).where(build_document_sql_filter(membership, project_id))
+    allowed_scopes = get_allowed_scopes(membership)
+    query = sb.table("documents").select("*").eq("project_id", project_id).in_("visibility_scope", allowed_scopes)
+
+    # Subcontractor trade filtering
+    if membership.role == "subcontractor" and membership.assigned_trade:
+        # We can't do complex OR filters easily in PostgREST, so we'll filter in Python
+        pass
 
     if doc_type:
-        query = query.where(Document.doc_type == doc_type)
+        query = query.eq("doc_type", doc_type)
     if visibility_scope:
-        query = query.where(Document.visibility_scope == visibility_scope)
+        query = query.eq("visibility_scope", visibility_scope)
     if trade_scope:
-        query = query.where(Document.trade_scope == trade_scope)
+        query = query.eq("trade_scope", trade_scope)
     if status:
-        query = query.where(Document.status == status)
+        query = query.eq("status", status)
     if search:
-        query = query.where(Document.file_name.ilike(f"%{search}%"))
+        query = query.ilike("file_name", f"%{search}%")
 
-    query = query.order_by(Document.created_at.desc())
-    result = await db.execute(query)
-    docs = result.scalars().all()
+    query = query.order("created_at", desc=True)
+    result = await query.execute()
+    docs = result.data
+
+    # Apply subcontractor trade filtering in Python
+    if membership.role == "subcontractor" and membership.assigned_trade:
+        docs = [
+            d for d in docs
+            if d["visibility_scope"] != "trade_scoped"
+            or d.get("trade_scope") == membership.assigned_trade
+            or d.get("trade_scope") is None
+        ]
 
     responses = []
     for d in docs:
-        uploader = await db.get(User, d.uploaded_by_user_id)
+        uploader_name = ""
+        if d.get("uploaded_by_user_id"):
+            u_result = await sb.table("users").select("full_name").eq("id", d["uploaded_by_user_id"]).maybe_single().execute()
+            if u_result.data:
+                uploader_name = u_result.data["full_name"]
         responses.append(DocumentResponse(
-            id=d.id, project_id=d.project_id, file_name=d.file_name,
-            file_type=d.file_type, doc_type=d.doc_type,
-            visibility_scope=d.visibility_scope, trade_scope=d.trade_scope,
-            revision=d.revision, status=d.status, issue_date=d.issue_date,
-            page_count=d.page_count, processing_error=d.processing_error,
-            uploaded_by_name=uploader.full_name if uploader else "",
-            created_at=d.created_at,
+            id=d["id"], project_id=d["project_id"], file_name=d["file_name"],
+            file_type=d["file_type"], doc_type=d["doc_type"],
+            visibility_scope=d["visibility_scope"], trade_scope=d.get("trade_scope"),
+            revision=d.get("revision"), status=d["status"], issue_date=d.get("issue_date"),
+            page_count=d.get("page_count"), processing_error=d.get("processing_error"),
+            uploaded_by_name=uploader_name, created_at=d["created_at"],
         ))
     return responses
 
@@ -73,9 +88,9 @@ async def upload_document(
     trade_scope: str | None = Form(None),
     revision: str | None = Form(None),
     issue_date: str | None = Form(None),
-    membership: ProjectMembership = Depends(get_project_membership),
-    user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
+    membership=Depends(get_project_membership),
+    user=Depends(get_current_user),
+    sb: AsyncClient = Depends(get_sb),
 ):
     role = ProjectRole(membership.role)
     if "document.upload" not in ROLE_PERMISSIONS.get(role, set()):
@@ -89,43 +104,43 @@ async def upload_document(
     file_type = ext.lstrip(".")
     if file_type == "jpeg":
         file_type = "jpg"
-    doc = Document(
-        project_id=project_id,
-        uploaded_by_user_id=user.id,
-        file_name=file.filename or "unnamed",
-        storage_key="",
-        file_type=file_type,
-        doc_type=doc_type,
-        visibility_scope=visibility_scope,
-        trade_scope=trade_scope,
-        revision=revision,
-        issue_date=issue_date,
-        status="processing",
-    )
-    db.add(doc)
-    await db.flush()
 
-    storage_key = f"projects/{project_id}/documents/{doc.id}/original{ext}"
+    doc_id = str(uuid.uuid4())
+    storage_key = f"projects/{project_id}/documents/{doc_id}/original{ext}"
     upload_file(storage_key, file_data, content_type=file.content_type or "application/octet-stream")
-    doc.storage_key = storage_key
 
-    await log_action(db, "document.upload", user_id=user.id, project_id=project_id,
-                     entity_type="document", entity_id=doc.id,
-                     details={"file_name": doc.file_name, "doc_type": doc_type})
-    await db.commit()
-    await db.refresh(doc)
+    doc_data = {
+        "id": doc_id,
+        "project_id": project_id,
+        "uploaded_by_user_id": user.id,
+        "file_name": file.filename or "unnamed",
+        "storage_key": storage_key,
+        "file_type": file_type,
+        "doc_type": doc_type,
+        "visibility_scope": visibility_scope,
+        "trade_scope": trade_scope,
+        "revision": revision,
+        "issue_date": issue_date,
+        "status": "processing",
+    }
+    result = await sb.table("documents").insert(doc_data).execute()
+    doc = result.data[0]
 
-    # Dispatch background ingestion task (replaces Celery)
+    await log_action(sb, "document.upload", user_id=user.id, project_id=project_id,
+                     entity_type="document", entity_id=doc_id,
+                     details={"file_name": doc["file_name"], "doc_type": doc_type})
+
+    # Dispatch background ingestion
     from app.services.ingestion import ingest_document
-    background_tasks.add_task(ingest_document, doc.id)
+    background_tasks.add_task(ingest_document, doc_id)
 
     return DocumentResponse(
-        id=doc.id, project_id=doc.project_id, file_name=doc.file_name,
-        file_type=doc.file_type, doc_type=doc.doc_type,
-        visibility_scope=doc.visibility_scope, trade_scope=doc.trade_scope,
-        revision=doc.revision, status=doc.status, issue_date=doc.issue_date,
-        page_count=doc.page_count, uploaded_by_name=user.full_name,
-        created_at=doc.created_at,
+        id=doc["id"], project_id=doc["project_id"], file_name=doc["file_name"],
+        file_type=doc["file_type"], doc_type=doc["doc_type"],
+        visibility_scope=doc["visibility_scope"], trade_scope=doc.get("trade_scope"),
+        revision=doc.get("revision"), status=doc["status"], issue_date=doc.get("issue_date"),
+        page_count=doc.get("page_count"), uploaded_by_name=user.full_name,
+        created_at=doc["created_at"],
     )
 
 
@@ -133,46 +148,46 @@ async def upload_document(
 async def get_document(
     project_id: str,
     document_id: str,
-    membership: ProjectMembership = Depends(get_project_membership),
-    user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
+    membership=Depends(get_project_membership),
+    user=Depends(get_current_user),
+    sb: AsyncClient = Depends(get_sb),
 ):
-    result = await db.execute(
-        select(Document).where(
-            build_document_sql_filter(membership, project_id),
-            Document.id == document_id,
-        )
-    )
-    doc = result.scalar_one_or_none()
+    allowed_scopes = get_allowed_scopes(membership)
+    result = await sb.table("documents").select("*").eq("id", document_id).eq("project_id", project_id).in_("visibility_scope", allowed_scopes).maybe_single().execute()
+    doc = result.data
     if not doc:
         raise HTTPException(status_code=404, detail="Document not found")
 
-    pages_result = await db.execute(
-        select(DocumentPage)
-        .where(DocumentPage.document_id == document_id)
-        .order_by(DocumentPage.page_number)
-    )
-    pages = pages_result.scalars().all()
+    # Subcontractor trade check
+    if membership.role == "subcontractor" and membership.assigned_trade:
+        if doc["visibility_scope"] == "trade_scoped" and doc.get("trade_scope") != membership.assigned_trade and doc.get("trade_scope") is not None:
+            raise HTTPException(status_code=404, detail="Document not found")
 
-    await log_action(db, "document.view", user_id=user.id, project_id=project_id,
+    pages_result = await sb.table("document_pages").select("*").eq("document_id", document_id).order("page_number").execute()
+    pages = pages_result.data
+
+    await log_action(sb, "document.view", user_id=user.id, project_id=project_id,
                      entity_type="document", entity_id=document_id)
-    await db.commit()
 
-    uploader = await db.get(User, doc.uploaded_by_user_id)
+    uploader_name = ""
+    if doc.get("uploaded_by_user_id"):
+        u_result = await sb.table("users").select("full_name").eq("id", doc["uploaded_by_user_id"]).maybe_single().execute()
+        if u_result.data:
+            uploader_name = u_result.data["full_name"]
+
     return DocumentDetailResponse(
-        id=doc.id, project_id=doc.project_id, file_name=doc.file_name,
-        file_type=doc.file_type, doc_type=doc.doc_type,
-        visibility_scope=doc.visibility_scope, trade_scope=doc.trade_scope,
-        revision=doc.revision, status=doc.status, issue_date=doc.issue_date,
-        page_count=doc.page_count, processing_error=doc.processing_error,
-        uploaded_by_name=uploader.full_name if uploader else "",
-        created_at=doc.created_at,
-        metadata_json=doc.metadata_json,
-        storage_key=doc.storage_key,
+        id=doc["id"], project_id=doc["project_id"], file_name=doc["file_name"],
+        file_type=doc["file_type"], doc_type=doc["doc_type"],
+        visibility_scope=doc["visibility_scope"], trade_scope=doc.get("trade_scope"),
+        revision=doc.get("revision"), status=doc["status"], issue_date=doc.get("issue_date"),
+        page_count=doc.get("page_count"), processing_error=doc.get("processing_error"),
+        uploaded_by_name=uploader_name, created_at=doc["created_at"],
+        metadata_json=doc.get("metadata_json"),
+        storage_key=doc.get("storage_key", ""),
         pages=[PageResponse(
-            id=p.id, page_number=p.page_number,
-            page_summary=p.page_summary,
-            image_storage_key=p.image_storage_key,
+            id=p["id"], page_number=p["page_number"],
+            page_summary=p.get("page_summary"),
+            image_storage_key=p.get("image_storage_key"),
         ) for p in pages],
     )
 
@@ -181,24 +196,20 @@ async def get_document(
 async def download_document(
     project_id: str,
     document_id: str,
-    membership: ProjectMembership = Depends(get_project_membership),
-    db: AsyncSession = Depends(get_db),
+    membership=Depends(get_project_membership),
+    sb: AsyncClient = Depends(get_sb),
 ):
-    result = await db.execute(
-        select(Document).where(
-            build_document_sql_filter(membership, project_id),
-            Document.id == document_id,
-        )
-    )
-    doc = result.scalar_one_or_none()
+    allowed_scopes = get_allowed_scopes(membership)
+    result = await sb.table("documents").select("*").eq("id", document_id).eq("project_id", project_id).in_("visibility_scope", allowed_scopes).maybe_single().execute()
+    doc = result.data
     if not doc:
         raise HTTPException(status_code=404, detail="Document not found")
 
-    data = download_file(doc.storage_key)
+    data = download_file(doc["storage_key"])
     return StreamingResponse(
         io.BytesIO(data),
         media_type="application/octet-stream",
-        headers={"Content-Disposition": f'attachment; filename="{doc.file_name}"'},
+        headers={"Content-Disposition": f'attachment; filename="{doc["file_name"]}"'},
     )
 
 
@@ -207,28 +218,18 @@ async def get_page_image(
     project_id: str,
     document_id: str,
     page_number: int,
-    membership: ProjectMembership = Depends(get_project_membership),
-    db: AsyncSession = Depends(get_db),
+    membership=Depends(get_project_membership),
+    sb: AsyncClient = Depends(get_sb),
 ):
-    result = await db.execute(
-        select(Document).where(
-            build_document_sql_filter(membership, project_id),
-            Document.id == document_id,
-        )
-    )
-    doc = result.scalar_one_or_none()
-    if not doc:
+    allowed_scopes = get_allowed_scopes(membership)
+    result = await sb.table("documents").select("id").eq("id", document_id).eq("project_id", project_id).in_("visibility_scope", allowed_scopes).maybe_single().execute()
+    if not result.data:
         raise HTTPException(status_code=404, detail="Document not found")
 
-    page_result = await db.execute(
-        select(DocumentPage).where(
-            DocumentPage.document_id == document_id,
-            DocumentPage.page_number == page_number,
-        )
-    )
-    page = page_result.scalar_one_or_none()
-    if not page or not page.image_storage_key:
+    page_result = await sb.table("document_pages").select("*").eq("document_id", document_id).eq("page_number", page_number).maybe_single().execute()
+    page = page_result.data
+    if not page or not page.get("image_storage_key"):
         raise HTTPException(status_code=404, detail="Page image not found")
 
-    data = download_file(page.image_storage_key)
+    data = download_file(page["image_storage_key"])
     return StreamingResponse(io.BytesIO(data), media_type="image/png")

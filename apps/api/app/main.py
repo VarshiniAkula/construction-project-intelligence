@@ -5,7 +5,7 @@ from app.config import settings
 from app.api.router import api_router
 
 app = FastAPI(
-    title="BuildDocs AI",
+    title="Construction RAG",
     description="Role-aware construction document chatbot API",
     version="1.0.0",
 )

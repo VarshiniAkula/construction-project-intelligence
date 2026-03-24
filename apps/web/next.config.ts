@@ -7,11 +7,15 @@ const nextConfig: NextConfig = {
     return config;
   },
   async rewrites() {
-    const apiUrl = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+    const apiUrl = process.env.API_BACKEND_URL || "https://builddocs-api.vercel.app";
     return [
       {
         source: "/api/:path*",
         destination: `${apiUrl}/api/:path*`,
+      },
+      {
+        source: "/health",
+        destination: `${apiUrl}/health`,
       },
     ];
   },

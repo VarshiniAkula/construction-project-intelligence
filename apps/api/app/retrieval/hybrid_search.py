@@ -1,6 +1,6 @@
 """Hybrid search combining dense retrieval (pgvector) with reranking."""
 import logging
-from sqlalchemy.ext.asyncio import AsyncSession
+from supabase._async.client import AsyncClient
 
 from app.ai.embeddings import embed_query
 from app.ai.reranker import rerank_documents
@@ -10,7 +10,7 @@ logger = logging.getLogger(__name__)
 
 
 async def hybrid_retrieve(
-    db: AsyncSession,
+    sb: AsyncClient,
     project_id: str,
     query: str,
     allowed_scopes: list[str],
@@ -18,10 +18,6 @@ async def hybrid_retrieve(
     initial_limit: int = 20,
     final_top_k: int = 5,
 ) -> list[dict]:
-    """
-    1. Dense search with embeddings via pgvector
-    2. Rerank with cross-encoder
-    """
     # Step 1: Embed query
     try:
         query_embedding = await embed_query(query)
@@ -29,9 +25,9 @@ async def hybrid_retrieve(
         logger.error(f"Embedding failed: {e}")
         return []
 
-    # Step 2: Dense retrieval from pgvector
+    # Step 2: Dense retrieval from pgvector via Supabase RPC
     candidates = await search_chunks_pgvector(
-        db=db,
+        sb=sb,
         project_id=project_id,
         query_embedding=query_embedding,
         allowed_scopes=allowed_scopes,

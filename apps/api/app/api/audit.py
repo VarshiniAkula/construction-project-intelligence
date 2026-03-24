@@ -1,13 +1,9 @@
 from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy import select, func
-from sqlalchemy.ext.asyncio import AsyncSession
+from supabase._async.client import AsyncClient
 
-from app.deps import get_db, get_current_user, get_project_membership
-from app.models.user import User
-from app.models.membership import ProjectMembership
-from app.models.audit import AuditLog
+from app.deps import get_sb, get_current_user, get_project_membership
 from app.schemas.audit import AuditLogResponse
-from shared.roles import ProjectRole, ROLE_PERMISSIONS
+from app.shared_roles import ProjectRole, ROLE_PERMISSIONS
 
 router = APIRouter()
 
@@ -18,41 +14,38 @@ async def list_audit_logs(
     action: str | None = Query(None),
     limit: int = Query(50, le=200),
     offset: int = Query(0),
-    membership: ProjectMembership = Depends(get_project_membership),
-    user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
+    membership=Depends(get_project_membership),
+    user=Depends(get_current_user),
+    sb: AsyncClient = Depends(get_sb),
 ):
     role = ProjectRole(membership.role)
     if "audit.view" not in ROLE_PERMISSIONS.get(role, set()):
         raise HTTPException(status_code=403, detail="Not authorized to view audit logs")
 
-    query = (
-        select(AuditLog)
-        .where(AuditLog.project_id == project_id)
-        .order_by(AuditLog.created_at.desc())
-        .offset(offset)
-        .limit(limit)
-    )
+    query = sb.table("audit_logs").select("*").eq("project_id", project_id).order("created_at", desc=True).range(offset, offset + limit - 1)
 
     if action:
-        query = query.where(AuditLog.action == action)
+        query = query.eq("action", action)
 
-    result = await db.execute(query)
-    logs = result.scalars().all()
+    result = await query.execute()
+    logs = result.data
 
     responses = []
     for log in logs:
-        log_user = await db.get(User, log.user_id) if log.user_id else None
+        log_user = None
+        if log.get("user_id"):
+            u_result = await sb.table("users").select("email,full_name").eq("id", log["user_id"]).maybe_single().execute()
+            log_user = u_result.data
         responses.append(AuditLogResponse(
-            id=log.id,
-            project_id=log.project_id,
-            user_id=log.user_id,
-            user_email=log_user.email if log_user else "",
-            user_name=log_user.full_name if log_user else "",
-            action=log.action,
-            entity_type=log.entity_type,
-            entity_id=log.entity_id,
-            details_json=log.details_json,
-            created_at=log.created_at,
+            id=log["id"],
+            project_id=log.get("project_id"),
+            user_id=log.get("user_id"),
+            user_email=log_user["email"] if log_user else "",
+            user_name=log_user["full_name"] if log_user else "",
+            action=log["action"],
+            entity_type=log.get("entity_type"),
+            entity_id=log.get("entity_id"),
+            details_json=log.get("details_json"),
+            created_at=log["created_at"],
         ))
     return responses

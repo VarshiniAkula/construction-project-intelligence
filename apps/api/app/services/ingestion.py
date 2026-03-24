@@ -6,40 +6,40 @@ import uuid
 import logging
 import os
 
-from sqlalchemy import create_engine, text
-from sqlalchemy.orm import sessionmaker
+import httpx
 
 from app.config import settings
 from app.services.storage import upload_file, download_file
 
 logger = logging.getLogger(__name__)
 
-# Sync engine for background tasks (asyncio BackgroundTasks run in threadpool)
-_sync_engine = None
-_SyncSession = None
+# Sync Supabase client for background tasks
+_sb_client = None
 
 
-def _get_sync_session():
-    global _sync_engine, _SyncSession
-    if _sync_engine is None:
-        db_url = settings.DATABASE_URL
-        if "asyncpg" in db_url:
-            db_url = db_url.replace("postgresql+asyncpg", "postgresql+psycopg")
-        _sync_engine = create_engine(db_url, pool_pre_ping=True)
-        _SyncSession = sessionmaker(bind=_sync_engine)
-    return _SyncSession()
+def _get_sb():
+    global _sb_client
+    if _sb_client is None:
+        from supabase import create_client
+        _sb_client = create_client(settings.SUPABASE_URL, settings.SUPABASE_SERVICE_KEY)
+    return _sb_client
+
+
+def _execute_sql(sql: str, params: dict | None = None):
+    """Execute raw SQL via Supabase's REST SQL endpoint (for pgvector operations)."""
+    # Use the postgrest RPC or direct SQL endpoint
+    # Supabase doesn't have a direct SQL endpoint via REST, so we'll use a workaround
+    # We'll create chunks without embeddings via PostgREST, then update via RPC
+    pass
 
 
 def ingest_document(document_id: str):
     """Full ingestion pipeline for a document. Runs synchronously in a thread."""
-    session = _get_sync_session()
+    sb = _get_sb()
 
     try:
-        result = session.execute(
-            text("SELECT * FROM documents WHERE id = :id"),
-            {"id": document_id},
-        )
-        doc_row = result.mappings().first()
+        result = sb.table("documents").select("*").eq("id", document_id).maybe_single().execute()
+        doc_row = result.data
         if not doc_row:
             logger.error(f"Document {document_id} not found")
             return
@@ -49,76 +49,54 @@ def ingest_document(document_id: str):
         file_type = storage_key.rsplit(".", 1)[-1] if "." in storage_key else "pdf"
         doc_type = doc_row["doc_type"]
         visibility_scope = doc_row["visibility_scope"]
-        trade_scope = doc_row["trade_scope"] or ""
+        trade_scope = doc_row.get("trade_scope") or ""
 
         logger.info(f"Starting ingestion for document {document_id} ({file_type})")
 
-        session.execute(
-            text("UPDATE documents SET status = 'rendering_pages' WHERE id = :id"),
-            {"id": document_id},
-        )
-        session.commit()
+        sb.table("documents").update({"status": "rendering_pages"}).eq("id", document_id).execute()
 
         # Download file
         file_data = download_file(storage_key)
 
         # Process based on type
         if file_type == "pdf":
-            pages_data = _process_pdf(session, document_id, project_id, file_data)
+            pages_data = _process_pdf(sb, document_id, project_id, file_data)
         elif file_type in ("png", "jpg", "jpeg"):
-            pages_data = _process_image(session, document_id, project_id, file_data, file_type)
+            pages_data = _process_image(sb, document_id, project_id, file_data, file_type)
         elif file_type == "docx":
-            pages_data = _process_docx(session, document_id, file_data)
+            pages_data = _process_docx(sb, document_id, file_data)
         elif file_type in ("xlsx", "xls"):
-            pages_data = _process_xlsx(session, document_id, file_data)
+            pages_data = _process_xlsx(sb, document_id, file_data)
         elif file_type == "csv":
-            pages_data = _process_csv(session, document_id, file_data)
+            pages_data = _process_csv(sb, document_id, file_data)
         else:
             raise ValueError(f"Unsupported file type: {file_type}")
 
         # Update page count
-        session.execute(
-            text("UPDATE documents SET page_count = :count, status = 'chunking' WHERE id = :id"),
-            {"count": len(pages_data), "id": document_id},
-        )
-        session.commit()
+        sb.table("documents").update({"page_count": len(pages_data), "status": "chunking"}).eq("id", document_id).execute()
 
         # Chunk
         chunks = _chunk_pages(pages_data, doc_type)
         logger.info(f"Created {len(chunks)} chunks for document {document_id}")
 
         # Embed and store
-        session.execute(
-            text("UPDATE documents SET status = 'embedding' WHERE id = :id"),
-            {"id": document_id},
-        )
-        session.commit()
+        sb.table("documents").update({"status": "embedding"}).eq("id", document_id).execute()
 
         if chunks:
-            _embed_and_store(session, document_id, project_id, chunks, visibility_scope, trade_scope, doc_type)
+            _embed_and_store(sb, document_id, project_id, chunks, visibility_scope, trade_scope, doc_type)
 
-        session.execute(
-            text("UPDATE documents SET status = 'ready' WHERE id = :id"),
-            {"id": document_id},
-        )
-        session.commit()
+        sb.table("documents").update({"status": "ready"}).eq("id", document_id).execute()
         logger.info(f"Document {document_id} ingestion complete")
 
     except Exception as e:
         logger.error(f"Ingestion failed for {document_id}: {e}", exc_info=True)
         try:
-            session.execute(
-                text("UPDATE documents SET status = 'error', processing_error = :err WHERE id = :id"),
-                {"err": str(e)[:1000], "id": document_id},
-            )
-            session.commit()
+            sb.table("documents").update({"status": "error", "processing_error": str(e)[:1000]}).eq("id", document_id).execute()
         except Exception:
-            session.rollback()
-    finally:
-        session.close()
+            pass
 
 
-def _process_pdf(session, document_id: str, project_id: str, file_data: bytes) -> list[dict]:
+def _process_pdf(sb, document_id: str, project_id: str, file_data: bytes) -> list[dict]:
     import fitz
 
     doc = fitz.open(stream=file_data, filetype="pdf")
@@ -139,18 +117,15 @@ def _process_pdf(session, document_id: str, project_id: str, file_data: bytes) -
         cleaned_text = raw_text.strip()
 
         page_id = str(uuid.uuid4())
-        session.execute(
-            text("""INSERT INTO document_pages
-                (id, document_id, page_number, raw_text, cleaned_text, page_summary,
-                 image_storage_key, extracted_json, created_at, updated_at)
-                VALUES (:id, :doc_id, :pn, :raw, :cleaned, :summary, :img_key, NULL,
-                        NOW(), NOW())"""),
-            {
-                "id": page_id, "doc_id": document_id, "pn": page_num + 1,
-                "raw": raw_text, "cleaned": cleaned_text, "summary": page_summary,
-                "img_key": image_key,
-            },
-        )
+        sb.table("document_pages").insert({
+            "id": page_id,
+            "document_id": document_id,
+            "page_number": page_num + 1,
+            "raw_text": raw_text,
+            "cleaned_text": cleaned_text,
+            "page_summary": page_summary,
+            "image_storage_key": image_key,
+        }).execute()
 
         pages_data.append({
             "page_number": page_num + 1,
@@ -159,28 +134,28 @@ def _process_pdf(session, document_id: str, project_id: str, file_data: bytes) -
             "summary": page_summary,
         })
 
-    session.commit()
     doc.close()
     return pages_data
 
 
-def _process_image(session, document_id: str, project_id: str, file_data: bytes, file_type: str) -> list[dict]:
+def _process_image(sb, document_id: str, project_id: str, file_data: bytes, file_type: str) -> list[dict]:
     image_key = f"projects/{project_id}/documents/{document_id}/pages/1.png"
     upload_file(image_key, file_data, content_type=f"image/{file_type}")
 
     page_id = str(uuid.uuid4())
-    session.execute(
-        text("""INSERT INTO document_pages
-            (id, document_id, page_number, raw_text, cleaned_text, page_summary,
-             image_storage_key, extracted_json, created_at, updated_at)
-            VALUES (:id, :doc_id, 1, '', 'Image document', 'Image document', :img_key, NULL, NOW(), NOW())"""),
-        {"id": page_id, "doc_id": document_id, "img_key": image_key},
-    )
-    session.commit()
+    sb.table("document_pages").insert({
+        "id": page_id,
+        "document_id": document_id,
+        "page_number": 1,
+        "raw_text": "",
+        "cleaned_text": "Image document",
+        "page_summary": "Image document",
+        "image_storage_key": image_key,
+    }).execute()
     return [{"page_number": 1, "raw_text": "", "cleaned_text": "Image document", "summary": "Image document"}]
 
 
-def _process_docx(session, document_id: str, file_data: bytes) -> list[dict]:
+def _process_docx(sb, document_id: str, file_data: bytes) -> list[dict]:
     from docx import Document as DocxDocument
 
     doc = DocxDocument(io.BytesIO(file_data))
@@ -206,16 +181,14 @@ def _process_docx(session, document_id: str, file_data: bytes) -> list[dict]:
             continue
 
         page_id = str(uuid.uuid4())
-        session.execute(
-            text("""INSERT INTO document_pages
-                (id, document_id, page_number, raw_text, cleaned_text, page_summary,
-                 image_storage_key, extracted_json, created_at, updated_at)
-                VALUES (:id, :doc_id, :pn, :raw, :cleaned, :summary, NULL, NULL, NOW(), NOW())"""),
-            {
-                "id": page_id, "doc_id": document_id, "pn": page_num,
-                "raw": page_text, "cleaned": page_text, "summary": page_text[:500],
-            },
-        )
+        sb.table("document_pages").insert({
+            "id": page_id,
+            "document_id": document_id,
+            "page_number": page_num,
+            "raw_text": page_text,
+            "cleaned_text": page_text,
+            "page_summary": page_text[:500],
+        }).execute()
         pages_data.append({
             "page_number": page_num, "raw_text": page_text,
             "cleaned_text": page_text, "summary": page_text[:500],
@@ -224,11 +197,10 @@ def _process_docx(session, document_id: str, file_data: bytes) -> list[dict]:
     if not pages_data:
         pages_data = [{"page_number": 1, "raw_text": "", "cleaned_text": "Empty document", "summary": "Empty document"}]
 
-    session.commit()
     return pages_data
 
 
-def _process_xlsx(session, document_id: str, file_data: bytes) -> list[dict]:
+def _process_xlsx(sb, document_id: str, file_data: bytes) -> list[dict]:
     from openpyxl import load_workbook
 
     wb = load_workbook(io.BytesIO(file_data), read_only=True, data_only=True)
@@ -255,17 +227,14 @@ def _process_xlsx(session, document_id: str, file_data: bytes) -> list[dict]:
             page_text = f"Sheet: {sheet_name}\n" + "\n".join(chunk_rows)
 
             page_id = str(uuid.uuid4())
-            session.execute(
-                text("""INSERT INTO document_pages
-                    (id, document_id, page_number, raw_text, cleaned_text, page_summary,
-                     image_storage_key, extracted_json, created_at, updated_at)
-                    VALUES (:id, :doc_id, :pn, :raw, :cleaned, :summary, NULL, NULL, NOW(), NOW())"""),
-                {
-                    "id": page_id, "doc_id": document_id, "pn": page_num,
-                    "raw": page_text, "cleaned": page_text,
-                    "summary": f"Sheet '{sheet_name}' rows {i+1}-{i+len(chunk_rows)}",
-                },
-            )
+            sb.table("document_pages").insert({
+                "id": page_id,
+                "document_id": document_id,
+                "page_number": page_num,
+                "raw_text": page_text,
+                "cleaned_text": page_text,
+                "page_summary": f"Sheet '{sheet_name}' rows {i+1}-{i+len(chunk_rows)}",
+            }).execute()
             pages_data.append({
                 "page_number": page_num, "raw_text": page_text,
                 "cleaned_text": page_text,
@@ -276,11 +245,10 @@ def _process_xlsx(session, document_id: str, file_data: bytes) -> list[dict]:
     if not pages_data:
         pages_data = [{"page_number": 1, "raw_text": "", "cleaned_text": "Empty spreadsheet", "summary": "Empty spreadsheet"}]
 
-    session.commit()
     return pages_data
 
 
-def _process_csv(session, document_id: str, file_data: bytes) -> list[dict]:
+def _process_csv(sb, document_id: str, file_data: bytes) -> list[dict]:
     text_content = file_data.decode("utf-8", errors="replace")
     reader = csv.reader(io.StringIO(text_content))
     rows_text = [" | ".join(row) for row in reader if any(c.strip() for c in row)]
@@ -295,17 +263,14 @@ def _process_csv(session, document_id: str, file_data: bytes) -> list[dict]:
             continue
 
         page_id = str(uuid.uuid4())
-        session.execute(
-            text("""INSERT INTO document_pages
-                (id, document_id, page_number, raw_text, cleaned_text, page_summary,
-                 image_storage_key, extracted_json, created_at, updated_at)
-                VALUES (:id, :doc_id, :pn, :raw, :cleaned, :summary, NULL, NULL, NOW(), NOW())"""),
-            {
-                "id": page_id, "doc_id": document_id, "pn": page_num,
-                "raw": page_text, "cleaned": page_text,
-                "summary": f"CSV rows {i+1}-{i+len(chunk_rows)}",
-            },
-        )
+        sb.table("document_pages").insert({
+            "id": page_id,
+            "document_id": document_id,
+            "page_number": page_num,
+            "raw_text": page_text,
+            "cleaned_text": page_text,
+            "page_summary": f"CSV rows {i+1}-{i+len(chunk_rows)}",
+        }).execute()
         pages_data.append({
             "page_number": page_num, "raw_text": page_text,
             "cleaned_text": page_text, "summary": f"CSV rows {i+1}-{i+len(chunk_rows)}",
@@ -314,7 +279,6 @@ def _process_csv(session, document_id: str, file_data: bytes) -> list[dict]:
     if not pages_data:
         pages_data = [{"page_number": 1, "raw_text": "", "cleaned_text": "Empty CSV", "summary": "Empty CSV"}]
 
-    session.commit()
     return pages_data
 
 
@@ -379,55 +343,63 @@ def _split_by_paragraphs(t: str, max_size: int = 800, overlap: int = 100) -> lis
     return [c for c in chunks if c.strip()]
 
 
-def _embed_and_store(session, document_id, project_id, chunks, visibility_scope, trade_scope, doc_type):
-    """Generate embeddings and store in pgvector."""
+def _embed_and_store(sb, document_id, project_id, chunks, visibility_scope, trade_scope, doc_type):
+    """Generate embeddings and store chunks. Embeddings are stored via direct HTTP call."""
     texts = [c["text"] for c in chunks]
 
     try:
         embeddings = _get_embeddings(texts)
     except Exception as e:
         logger.error(f"Embedding failed: {e}")
-        # Store chunks without embeddings
-        for i, chunk in enumerate(chunks):
-            chunk_id = str(uuid.uuid4())
-            session.execute(
-                text("""INSERT INTO document_chunks
-                    (id, document_id, page_number, chunk_index, chunk_text, metadata_json,
-                     visibility_scope, trade_scope, vector_id, created_at, updated_at)
-                    VALUES (:id, :doc_id, :pn, :ci, :text, :meta, :vis, :trade, NULL, NOW(), NOW())"""),
-                {
-                    "id": chunk_id, "doc_id": document_id,
-                    "pn": chunk["page_number"], "ci": i,
-                    "text": chunk["text"],
-                    "meta": json.dumps({"chunk_type": chunk["chunk_type"]}),
-                    "vis": visibility_scope, "trade": trade_scope,
-                },
-            )
-        session.commit()
-        return
+        embeddings = None
 
-    # Store chunks with embeddings in pgvector
-    for i, (chunk, embedding) in enumerate(zip(chunks, embeddings)):
+    # Store chunks via PostgREST
+    chunk_ids = []
+    for i, chunk in enumerate(chunks):
         chunk_id = str(uuid.uuid4())
-        embedding_str = "[" + ",".join(str(x) for x in embedding) + "]"
+        chunk_ids.append(chunk_id)
+        sb.table("document_chunks").insert({
+            "id": chunk_id,
+            "document_id": document_id,
+            "page_number": chunk["page_number"],
+            "chunk_index": i,
+            "chunk_text": chunk["text"],
+            "metadata_json": {"chunk_type": chunk["chunk_type"]},
+            "visibility_scope": visibility_scope,
+            "trade_scope": trade_scope,
+            "vector_id": chunk_id,
+        }).execute()
 
-        session.execute(
-            text("""INSERT INTO document_chunks
-                (id, document_id, page_number, chunk_index, chunk_text, metadata_json,
-                 visibility_scope, trade_scope, vector_id, embedding, created_at, updated_at)
-                VALUES (:id, :doc_id, :pn, :ci, :text, :meta, :vis, :trade, :vid, :emb::vector, NOW(), NOW())"""),
-            {
-                "id": chunk_id, "doc_id": document_id,
-                "pn": chunk["page_number"], "ci": i,
-                "text": chunk["text"],
-                "meta": json.dumps({"chunk_type": chunk["chunk_type"]}),
-                "vis": visibility_scope, "trade": trade_scope,
-                "vid": chunk_id, "emb": embedding_str,
-            },
-        )
+    # Update embeddings via Supabase SQL HTTP API if we have them
+    if embeddings:
+        _update_embeddings_via_http(chunk_ids, embeddings)
 
-    session.commit()
-    logger.info(f"Stored {len(chunks)} vectors for document {document_id}")
+    logger.info(f"Stored {len(chunks)} chunks for document {document_id}")
+
+
+def _update_embeddings_via_http(chunk_ids: list[str], embeddings: list[list[float]]):
+    """Update chunk embeddings using Supabase's pg_net or direct SQL call."""
+    # Use the postgrest RPC endpoint to call a database function for vector updates
+    # Since PostgREST can't handle vector type casting, we use the SQL endpoint
+    url = f"{settings.SUPABASE_URL}/rest/v1/rpc/update_chunk_embedding"
+    headers = {
+        "apikey": settings.SUPABASE_SERVICE_KEY,
+        "Authorization": f"Bearer {settings.SUPABASE_SERVICE_KEY}",
+        "Content-Type": "application/json",
+    }
+
+    with httpx.Client(timeout=30) as client:
+        for chunk_id, embedding in zip(chunk_ids, embeddings):
+            try:
+                # Call RPC function to update embedding
+                resp = client.post(url, json={
+                    "p_chunk_id": chunk_id,
+                    "p_embedding": embedding,
+                }, headers=headers)
+                if resp.status_code >= 400:
+                    logger.warning(f"Failed to update embedding for {chunk_id}: {resp.text}")
+            except Exception as e:
+                logger.warning(f"Failed to update embedding for {chunk_id}: {e}")
 
 
 def _get_embeddings(texts: list[str]) -> list[list[float]]:
@@ -439,7 +411,6 @@ def _get_embeddings(texts: list[str]) -> list[list[float]]:
         model = TextEmbedding(model_name=model_name)
         return [emb.tolist() for emb in model.embed(texts)]
     else:
-        import httpx
         base_url = settings.EMBEDDING_BASE_URL
         api_key = settings.EMBEDDING_API_KEY
         model = settings.EMBEDDING_MODEL

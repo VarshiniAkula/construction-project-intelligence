@@ -1,0 +1,11 @@
+# Slim requirements for Vercel serverless (excludes heavy ML packages)
+fastapi>=0.115,<1.0
+uvicorn[standard]>=0.30
+python-multipart>=0.0.9
+supabase>=2.0
+pydantic>=2.6
+pydantic-settings>=2.4
+python-jose[cryptography]>=3.3
+passlib[bcrypt]>=1.7
+bcrypt>=4.0,<5.0
+httpx>=0.27

@@ -8,7 +8,7 @@ import { DOC_TYPE_LABELS, VISIBILITY_LABELS, STATUS_COLORS, formatDate } from "@
 import { FileText, Download, ChevronLeft, ChevronRight } from "lucide-react";
 import { useState, useEffect } from "react";
 
-const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+const API_URL = process.env.NEXT_PUBLIC_API_URL || "";
 
 export default function DocumentDetailPage() {
   const { projectId, docId } = useParams<{ projectId: string; docId: string }>();

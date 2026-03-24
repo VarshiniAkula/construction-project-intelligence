@@ -1,11 +1,8 @@
+import uuid
 from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession
+from supabase._async.client import AsyncClient
 
-from app.deps import get_db, get_current_user, get_project_membership
-from app.models.user import User
-from app.models.membership import ProjectMembership
-from app.models.chat import ChatSession, ChatMessage
+from app.deps import get_sb, get_current_user, get_project_membership
 from app.schemas.chat import (
     ChatSessionCreate, ChatSessionResponse,
     ChatMessageRequest, ChatMessageResponse, ChatAnswerResponse,
@@ -18,30 +15,21 @@ router = APIRouter()
 @router.get("/projects/{project_id}/chat/sessions", response_model=list[ChatSessionResponse])
 async def list_sessions(
     project_id: str,
-    membership: ProjectMembership = Depends(get_project_membership),
-    user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
+    membership=Depends(get_project_membership),
+    user=Depends(get_current_user),
+    sb: AsyncClient = Depends(get_sb),
 ):
-    result = await db.execute(
-        select(ChatSession)
-        .where(ChatSession.project_id == project_id, ChatSession.user_id == user.id)
-        .order_by(ChatSession.updated_at.desc())
-    )
-    sessions = result.scalars().all()
+    result = await sb.table("chat_sessions").select("*").eq("project_id", project_id).eq("user_id", user.id).order("updated_at", desc=True).execute()
+    sessions = result.data
 
     responses = []
     for s in sessions:
-        last_msg_result = await db.execute(
-            select(ChatMessage)
-            .where(ChatMessage.session_id == s.id)
-            .order_by(ChatMessage.created_at.desc())
-            .limit(1)
-        )
-        last_msg = last_msg_result.scalar_one_or_none()
+        last_msg_result = await sb.table("chat_messages").select("content").eq("session_id", s["id"]).order("created_at", desc=True).limit(1).execute()
+        last_msg = last_msg_result.data[0] if last_msg_result.data else None
         responses.append(ChatSessionResponse(
-            id=s.id, project_id=s.project_id, title=s.title,
-            created_at=s.created_at,
-            last_message=last_msg.content[:100] if last_msg else None,
+            id=s["id"], project_id=s["project_id"], title=s["title"],
+            created_at=s["created_at"],
+            last_message=last_msg["content"][:100] if last_msg else None,
         ))
     return responses
 
@@ -50,22 +38,21 @@ async def list_sessions(
 async def create_session(
     project_id: str,
     body: ChatSessionCreate,
-    membership: ProjectMembership = Depends(get_project_membership),
-    user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
+    membership=Depends(get_project_membership),
+    user=Depends(get_current_user),
+    sb: AsyncClient = Depends(get_sb),
 ):
-    session = ChatSession(
-        project_id=project_id,
-        user_id=user.id,
-        title=body.title,
-    )
-    db.add(session)
-    await db.commit()
-    await db.refresh(session)
-
+    session_data = {
+        "id": str(uuid.uuid4()),
+        "project_id": project_id,
+        "user_id": user.id,
+        "title": body.title,
+    }
+    result = await sb.table("chat_sessions").insert(session_data).execute()
+    session = result.data[0]
     return ChatSessionResponse(
-        id=session.id, project_id=session.project_id,
-        title=session.title, created_at=session.created_at,
+        id=session["id"], project_id=session["project_id"],
+        title=session["title"], created_at=session["created_at"],
     )
 
 
@@ -73,28 +60,25 @@ async def create_session(
 async def get_session_messages(
     project_id: str,
     session_id: str,
-    membership: ProjectMembership = Depends(get_project_membership),
-    user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
+    membership=Depends(get_project_membership),
+    user=Depends(get_current_user),
+    sb: AsyncClient = Depends(get_sb),
 ):
-    session = await db.get(ChatSession, session_id)
-    if not session or session.project_id != project_id or session.user_id != user.id:
+    session_result = await sb.table("chat_sessions").select("*").eq("id", session_id).maybe_single().execute()
+    session = session_result.data
+    if not session or session["project_id"] != project_id or session["user_id"] != user.id:
         raise HTTPException(status_code=404, detail="Session not found")
 
-    result = await db.execute(
-        select(ChatMessage)
-        .where(ChatMessage.session_id == session_id)
-        .order_by(ChatMessage.created_at)
-    )
-    messages = result.scalars().all()
+    result = await sb.table("chat_messages").select("*").eq("session_id", session_id).order("created_at").execute()
+    messages = result.data
 
     return [
         ChatMessageResponse(
-            id=m.id, session_id=m.session_id, role=m.role,
-            content=m.content,
-            citations=m.citations_json or [],
-            model_metadata=m.model_metadata_json,
-            created_at=m.created_at,
+            id=m["id"], session_id=m["session_id"], role=m["role"],
+            content=m["content"],
+            citations=m.get("citations_json") or [],
+            model_metadata=m.get("model_metadata_json"),
+            created_at=m["created_at"],
         )
         for m in messages
     ]
@@ -105,16 +89,17 @@ async def send_message(
     project_id: str,
     session_id: str,
     body: ChatMessageRequest,
-    membership: ProjectMembership = Depends(get_project_membership),
-    user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
+    membership=Depends(get_project_membership),
+    user=Depends(get_current_user),
+    sb: AsyncClient = Depends(get_sb),
 ):
-    session = await db.get(ChatSession, session_id)
-    if not session or session.project_id != project_id or session.user_id != user.id:
+    session_result = await sb.table("chat_sessions").select("*").eq("id", session_id).maybe_single().execute()
+    session = session_result.data
+    if not session or session["project_id"] != project_id or session["user_id"] != user.id:
         raise HTTPException(status_code=404, detail="Session not found")
 
     return await process_chat_message(
-        db=db,
+        sb=sb,
         user_id=user.id,
         project_id=project_id,
         session_id=session_id,

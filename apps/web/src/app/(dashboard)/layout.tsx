@@ -41,7 +41,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
             <div className="w-8 h-8 bg-hard-hat rounded-lg flex items-center justify-center">
               <HardHat className="w-5 h-5 text-white" />
             </div>
-            <span className="text-lg font-bold text-white">BuildDocs AI</span>
+            <span className="text-lg font-bold text-white">Construction RAG</span>
           </Link>
         </div>
 

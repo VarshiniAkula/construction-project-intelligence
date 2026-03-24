@@ -45,7 +45,7 @@ export default function LandingPage() {
           <div className="w-8 h-8 bg-hard-hat rounded-lg flex items-center justify-center">
             <HardHat className="w-5 h-5 text-white" />
           </div>
-          <span className="text-xl font-bold text-white">BuildDocs AI</span>
+          <span className="text-xl font-bold text-white">Construction RAG</span>
         </div>
         <Link href="/login" className="btn-primary text-sm">
           Sign In
@@ -62,7 +62,7 @@ export default function LandingPage() {
           <span className="text-hard-hat">Get cited answers.</span>
         </h1>
         <p className="text-lg text-gray-400 max-w-2xl mx-auto mb-10">
-          BuildDocs AI lets construction teams upload project documents, then chat with them.
+          Construction RAG lets construction teams upload project documents, then chat with them.
           Role-based access ensures every team member sees only what they should.
           Every answer cites the exact document and page.
         </p>
@@ -88,7 +88,7 @@ export default function LandingPage() {
 
       {/* Footer */}
       <footer className="border-t border-white/10 py-8 text-center text-gray-500 text-sm">
-        BuildDocs AI &mdash; Construction Document Intelligence Platform
+        Construction RAG &mdash; Construction Document Intelligence Platform
       </footer>
     </div>
   );

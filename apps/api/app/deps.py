@@ -1,25 +1,25 @@
-from typing import AsyncGenerator
-
+"""FastAPI dependencies using Supabase PostgREST."""
+from types import SimpleNamespace
 from fastapi import Depends, HTTPException, Request, status
-from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+from supabase._async.client import AsyncClient
 
-from app.config import settings
-from app.models.base import Base
-from app.models.user import User
-from app.models.membership import ProjectMembership
+from app.supabase_client import get_supabase
 from app.security.jwt import decode_token
 
-engine = create_async_engine(settings.DATABASE_URL, echo=False, pool_pre_ping=True)
-async_session_factory = async_sessionmaker(engine, expire_on_commit=False)
+
+def _row_to_ns(row: dict) -> SimpleNamespace:
+    """Convert a dict row to SimpleNamespace for attribute access."""
+    return SimpleNamespace(**row)
 
 
-async def get_db() -> AsyncGenerator[AsyncSession, None]:
-    async with async_session_factory() as session:
-        yield session
+async def get_sb() -> AsyncClient:
+    return await get_supabase()
 
 
-async def get_current_user(request: Request, db: AsyncSession = Depends(get_db)) -> User:
+async def get_current_user(
+    request: Request,
+    sb: AsyncClient = Depends(get_sb),
+) -> SimpleNamespace:
     token = request.cookies.get("access_token")
     if not token:
         auth_header = request.headers.get("Authorization", "")
@@ -33,36 +33,29 @@ async def get_current_user(request: Request, db: AsyncSession = Depends(get_db))
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token")
 
     user_id = payload.get("sub")
-    result = await db.execute(select(User).where(User.id == user_id))
-    user = result.scalar_one_or_none()
-    if not user or not user.is_active:
+    result = await sb.table("users").select("*").eq("id", user_id).maybe_single().execute()
+    user = result.data
+    if not user or not user.get("is_active"):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="User not found")
-    return user
+    return _row_to_ns(user)
 
 
 async def get_project_membership(
     project_id: str,
-    user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
-) -> ProjectMembership:
+    user: SimpleNamespace = Depends(get_current_user),
+    sb: AsyncClient = Depends(get_sb),
+) -> SimpleNamespace:
     if user.is_superadmin:
-        # Superadmins get synthetic admin membership
-        m = ProjectMembership(
+        return SimpleNamespace(
             id="superadmin",
             user_id=user.id,
             project_id=project_id,
             role="admin",
             assigned_trade=None,
         )
-        return m
 
-    result = await db.execute(
-        select(ProjectMembership).where(
-            ProjectMembership.user_id == user.id,
-            ProjectMembership.project_id == project_id,
-        )
-    )
-    membership = result.scalar_one_or_none()
+    result = await sb.table("project_memberships").select("*").eq("user_id", user.id).eq("project_id", project_id).maybe_single().execute()
+    membership = result.data
     if not membership:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not a project member")
-    return membership
+    return _row_to_ns(membership)

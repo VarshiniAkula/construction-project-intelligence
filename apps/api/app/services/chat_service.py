@@ -1,11 +1,8 @@
 """Chat/RAG pipeline orchestration."""
+import uuid
 import logging
-from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession
+from supabase._async.client import AsyncClient
 
-from app.models.membership import ProjectMembership
-from app.models.document import Document
-from app.models.chat import ChatSession, ChatMessage
 from app.rbac.filters import get_allowed_scopes
 from app.retrieval.hybrid_search import hybrid_retrieve
 from app.ai.generator import generate_answer
@@ -16,21 +13,21 @@ logger = logging.getLogger(__name__)
 
 
 async def process_chat_message(
-    db: AsyncSession,
+    sb: AsyncClient,
     user_id: str,
     project_id: str,
     session_id: str,
-    membership: ProjectMembership,
+    membership,
     content: str,
 ) -> ChatAnswerResponse:
     # Save user message
-    user_msg = ChatMessage(
-        session_id=session_id,
-        role="user",
-        content=content,
-    )
-    db.add(user_msg)
-    await db.flush()
+    user_msg_data = {
+        "id": str(uuid.uuid4()),
+        "session_id": session_id,
+        "role": "user",
+        "content": content,
+    }
+    await sb.table("chat_messages").insert(user_msg_data).execute()
 
     # Build RBAC scopes for pgvector search
     allowed_scopes = get_allowed_scopes(membership)
@@ -38,7 +35,7 @@ async def process_chat_message(
 
     # Retrieve and rerank
     retrieved_chunks = await hybrid_retrieve(
-        db=db,
+        sb=sb,
         project_id=project_id,
         query=content,
         allowed_scopes=allowed_scopes,
@@ -56,10 +53,9 @@ async def process_chat_message(
         doc_ids = list(set(c.get("document_id", "") for c in retrieved_chunks))
         doc_map = {}
         for doc_id in doc_ids:
-            result = await db.execute(select(Document).where(Document.id == doc_id))
-            doc = result.scalar_one_or_none()
-            if doc:
-                doc_map[doc_id] = doc
+            result = await sb.table("documents").select("id,file_name").eq("id", doc_id).maybe_single().execute()
+            if result.data:
+                doc_map[doc_id] = result.data
 
         context_chunks = []
         for chunk in retrieved_chunks:
@@ -67,29 +63,20 @@ async def process_chat_message(
             doc = doc_map.get(doc_id)
             context_chunks.append({
                 "text": chunk.get("text", chunk.get("chunk_text", "")),
-                "file_name": chunk.get("file_name", doc.file_name if doc else "Unknown"),
+                "file_name": chunk.get("file_name", doc["file_name"] if doc else "Unknown"),
                 "page_number": chunk.get("page_number", 0),
                 "document_id": doc_id,
                 "score": chunk.get("rerank_score", chunk.get("score", 0)),
             })
 
         # Get recent chat history
-        history_result = await db.execute(
-            select(ChatMessage)
-            .where(ChatMessage.session_id == session_id)
-            .order_by(ChatMessage.created_at.desc())
-            .limit(6)
-        )
-        history = [
-            {"role": m.role, "content": m.content}
-            for m in reversed(history_result.scalars().all())
-        ]
+        history_result = await sb.table("chat_messages").select("role,content").eq("session_id", session_id).order("created_at", desc=True).limit(6).execute()
+        history = [{"role": m["role"], "content": m["content"]} for m in reversed(history_result.data)]
 
         # Generate answer
         gen_result = await generate_answer(content, context_chunks, history)
         answer_text = gen_result["answer"]
 
-        # Build citations
         citations = [
             CitationItem(
                 document_id=c["document_id"],
@@ -103,27 +90,28 @@ async def process_chat_message(
         confidence = min(1.0, sum(c["score"] for c in context_chunks) / max(len(context_chunks), 1))
 
     # Save assistant message
-    assistant_msg = ChatMessage(
-        session_id=session_id,
-        role="assistant",
-        content=answer_text,
-        citations_json=[c.model_dump() for c in citations],
-        model_metadata_json={"model": "claude", "chunks_used": len(retrieved_chunks)},
-    )
-    db.add(assistant_msg)
+    assistant_msg_id = str(uuid.uuid4())
+    assistant_msg_data = {
+        "id": assistant_msg_id,
+        "session_id": session_id,
+        "role": "assistant",
+        "content": answer_text,
+        "citations_json": [c.model_dump() for c in citations],
+        "model_metadata_json": {"model": "claude", "chunks_used": len(retrieved_chunks)},
+    }
+    result = await sb.table("chat_messages").insert(assistant_msg_data).execute()
+    assistant_msg = result.data[0]
 
     # Update session title if first message
-    session = await db.get(ChatSession, session_id)
-    if session and session.title == "New Chat":
-        session.title = content[:80]
+    session_result = await sb.table("chat_sessions").select("title").eq("id", session_id).maybe_single().execute()
+    if session_result.data and session_result.data["title"] == "New Chat":
+        await sb.table("chat_sessions").update({"title": content[:80]}).eq("id", session_id).execute()
 
     await log_action(
-        db, "chat.query", user_id=user_id, project_id=project_id,
+        sb, "chat.query", user_id=user_id, project_id=project_id,
         entity_type="chat_session", entity_id=session_id,
         details={"query_length": len(content), "chunks_retrieved": len(retrieved_chunks)},
     )
-    await db.commit()
-    await db.refresh(assistant_msg)
 
     return ChatAnswerResponse(
         answer=answer_text,
@@ -132,11 +120,11 @@ async def process_chat_message(
         conflicts=[],
         used_document_ids=list(set(c.document_id for c in citations)),
         message=ChatMessageResponse(
-            id=assistant_msg.id,
+            id=assistant_msg["id"],
             session_id=session_id,
             role="assistant",
             content=answer_text,
             citations=citations,
-            created_at=assistant_msg.created_at,
+            created_at=assistant_msg["created_at"],
         ),
     )

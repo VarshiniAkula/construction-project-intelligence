@@ -4,7 +4,7 @@ import { QueryProvider } from "@/lib/query-provider";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "BuildDocs AI",
+  title: "Construction RAG",
   description: "Role-aware construction document chatbot",
 };
 
