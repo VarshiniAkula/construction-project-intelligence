@@ -1,0 +1,19 @@
+FROM python:3.11-slim
+
+WORKDIR /app
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential curl libpq-dev poppler-utils && \
+    rm -rf /var/lib/apt/lists/*
+
+COPY apps/api/requirements.txt /tmp/api-requirements.txt
+COPY apps/worker/requirements.txt /tmp/worker-requirements.txt
+RUN pip install --no-cache-dir -r /tmp/api-requirements.txt -r /tmp/worker-requirements.txt
+
+COPY packages/shared/python /app/shared
+COPY apps/api /app/api_app
+COPY apps/worker /app/worker_app
+
+ENV PYTHONPATH="/app:/app/shared:/app/api_app:/app/worker_app"
+
+CMD ["celery", "-A", "worker_app.worker.celery_app", "worker", "--loglevel=info", "--concurrency=2"]

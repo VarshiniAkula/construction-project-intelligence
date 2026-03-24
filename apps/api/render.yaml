@@ -1,0 +1,13 @@
+services:
+  - type: web
+    name: builddocs-api
+    runtime: python
+    region: ohio
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
+    envVars:
+      - key: PYTHONPATH
+        value: /opt/render/project/src/apps/api:/opt/render/project/src/packages/shared/python
+      - key: PORT
+        value: 10000
