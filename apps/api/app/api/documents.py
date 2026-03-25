@@ -63,8 +63,8 @@ async def list_documents(
     responses = []
     for d in docs:
         uploader_name = ""
-        if d.get("uploaded_by_user_id"):
-            u_result = await sb.table("users").select("full_name").eq("id", d["uploaded_by_user_id"]).maybe_single().execute()
+        if d.get("uploaded_by"):
+            u_result = await sb.table("users").select("full_name").eq("id", d["uploaded_by"]).maybe_single().execute()
             if u_result.data:
                 uploader_name = u_result.data["full_name"]
         responses.append(DocumentResponse(
@@ -92,6 +92,9 @@ async def upload_document(
     user=Depends(get_current_user),
     sb: AsyncClient = Depends(get_sb),
 ):
+    import logging
+    logger = logging.getLogger(__name__)
+
     role = ProjectRole(membership.role)
     if "document.upload" not in ROLE_PERMISSIONS.get(role, set()):
         raise HTTPException(status_code=403, detail="Not authorized to upload")
@@ -100,48 +103,57 @@ async def upload_document(
     if ext not in ALLOWED_EXTENSIONS:
         raise HTTPException(status_code=400, detail=f"File type {ext} not allowed")
 
-    file_data = await file.read()
-    file_type = ext.lstrip(".")
-    if file_type == "jpeg":
-        file_type = "jpg"
+    try:
+        file_data = await file.read()
+        file_type = ext.lstrip(".")
+        if file_type == "jpeg":
+            file_type = "jpg"
 
-    doc_id = str(uuid.uuid4())
-    storage_key = f"projects/{project_id}/documents/{doc_id}/original{ext}"
-    upload_file(storage_key, file_data, content_type=file.content_type or "application/octet-stream")
+        doc_id = str(uuid.uuid4())
+        storage_key = f"projects/{project_id}/documents/{doc_id}/original{ext}"
+        upload_file(storage_key, file_data, content_type=file.content_type or "application/octet-stream")
 
-    doc_data = {
-        "id": doc_id,
-        "project_id": project_id,
-        "uploaded_by_user_id": user.id,
-        "file_name": file.filename or "unnamed",
-        "storage_key": storage_key,
-        "file_type": file_type,
-        "doc_type": doc_type,
-        "visibility_scope": visibility_scope,
-        "trade_scope": trade_scope,
-        "revision": revision,
-        "issue_date": issue_date,
-        "status": "processing",
-    }
-    result = await sb.table("documents").insert(doc_data).execute()
-    doc = result.data[0]
+        doc_data = {
+            "id": doc_id,
+            "project_id": project_id,
+            "uploaded_by": user.id,
+            "file_name": file.filename or "unnamed",
+            "storage_key": storage_key,
+            "file_type": file_type,
+            "doc_type": doc_type,
+            "visibility_scope": visibility_scope,
+            "trade_scope": trade_scope,
+            "revision": revision,
+            "issue_date": issue_date,
+            "status": "processing",
+        }
+        result = await sb.table("documents").insert(doc_data).execute()
+        doc = result.data[0]
 
-    await log_action(sb, "document.upload", user_id=user.id, project_id=project_id,
-                     entity_type="document", entity_id=doc_id,
-                     details={"file_name": doc["file_name"], "doc_type": doc_type})
+        await log_action(sb, "document.upload", user_id=user.id, project_id=project_id,
+                         entity_type="document", entity_id=doc_id,
+                         details={"file_name": doc["file_name"], "doc_type": doc_type})
 
-    # Dispatch background ingestion
-    from app.services.ingestion import ingest_document
-    background_tasks.add_task(ingest_document, doc_id)
+        # Dispatch background ingestion (best-effort on serverless)
+        try:
+            from app.services.ingestion import ingest_document
+            background_tasks.add_task(ingest_document, doc_id)
+        except Exception as ing_err:
+            logger.warning(f"Could not schedule ingestion: {ing_err}")
 
-    return DocumentResponse(
-        id=doc["id"], project_id=doc["project_id"], file_name=doc["file_name"],
-        file_type=doc["file_type"], doc_type=doc["doc_type"],
-        visibility_scope=doc["visibility_scope"], trade_scope=doc.get("trade_scope"),
-        revision=doc.get("revision"), status=doc["status"], issue_date=doc.get("issue_date"),
-        page_count=doc.get("page_count"), uploaded_by_name=user.full_name,
-        created_at=doc["created_at"],
-    )
+        return DocumentResponse(
+            id=doc["id"], project_id=doc["project_id"], file_name=doc["file_name"],
+            file_type=doc["file_type"], doc_type=doc["doc_type"],
+            visibility_scope=doc["visibility_scope"], trade_scope=doc.get("trade_scope"),
+            revision=doc.get("revision"), status=doc["status"], issue_date=doc.get("issue_date"),
+            page_count=doc.get("page_count"), uploaded_by_name=user.full_name,
+            created_at=doc["created_at"],
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Upload error: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Upload failed: {str(e)}")
 
 
 @router.get("/projects/{project_id}/documents/{document_id}", response_model=DocumentDetailResponse)
@@ -170,8 +182,8 @@ async def get_document(
                      entity_type="document", entity_id=document_id)
 
     uploader_name = ""
-    if doc.get("uploaded_by_user_id"):
-        u_result = await sb.table("users").select("full_name").eq("id", doc["uploaded_by_user_id"]).maybe_single().execute()
+    if doc.get("uploaded_by"):
+        u_result = await sb.table("users").select("full_name").eq("id", doc["uploaded_by"]).maybe_single().execute()
         if u_result.data:
             uploader_name = u_result.data["full_name"]
 

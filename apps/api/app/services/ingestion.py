@@ -347,11 +347,16 @@ def _embed_and_store(sb, document_id, project_id, chunks, visibility_scope, trad
     """Generate embeddings and store chunks. Embeddings are stored via direct HTTP call."""
     texts = [c["text"] for c in chunks]
 
-    try:
-        embeddings = _get_embeddings(texts)
-    except Exception as e:
-        logger.error(f"Embedding failed: {e}")
-        embeddings = None
+    # Skip embeddings on Vercel serverless (no persistent model cache)
+    embeddings = None
+    if not os.environ.get("VERCEL"):
+        try:
+            embeddings = _get_embeddings(texts)
+        except Exception as e:
+            logger.error(f"Embedding failed: {e}")
+            embeddings = None
+    else:
+        logger.info("Vercel serverless: skipping embeddings, keyword search available")
 
     # Store chunks via PostgREST
     chunk_ids = []
@@ -364,6 +369,7 @@ def _embed_and_store(sb, document_id, project_id, chunks, visibility_scope, trad
             "page_number": chunk["page_number"],
             "chunk_index": i,
             "chunk_text": chunk["text"],
+            "doc_type": doc_type,
             "metadata_json": {"chunk_type": chunk["chunk_type"]},
             "visibility_scope": visibility_scope,
             "trade_scope": trade_scope,
