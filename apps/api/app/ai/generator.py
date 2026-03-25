@@ -32,7 +32,7 @@ def get_generator_provider():
                 base_url="https://api.groq.com/openai/v1",
                 api_key=settings.GROQ_API_KEY,
                 model=settings.GROQ_MODEL,
-                timeout=120.0,
+                timeout=30.0,
             )
         else:
             _provider = OpenAICompatibleProvider(

@@ -54,12 +54,26 @@ async def rerank_documents(query: str, documents: list[str], top_k: int = 5) -> 
 
 
 def _keyword_rerank(query: str, documents: list[str]) -> list[dict]:
-    """Simple keyword-overlap reranker when no ML model is available."""
-    query_terms = set(query.lower().split())
+    """Keyword-overlap reranker with TF-IDF-like scoring when no ML model is available."""
+    import re
+    stopwords = {"the", "a", "an", "is", "are", "was", "were", "be", "been", "being", "have", "has", "had", "do", "does", "did", "will", "would", "could", "should", "may", "might", "can", "shall", "for", "and", "nor", "but", "or", "yet", "so", "in", "on", "at", "to", "of", "with", "by", "from", "as", "into", "through", "during", "before", "after", "above", "below", "between", "out", "off", "over", "under", "again", "further", "then", "once", "here", "there", "when", "where", "why", "how", "all", "each", "every", "both", "few", "more", "most", "other", "some", "such", "no", "not", "only", "own", "same", "than", "too", "very", "just", "because", "about", "this", "that", "these", "those", "what", "which", "who", "whom", "it", "its"}
+    query_words = [re.sub(r'[^\w]', '', w).lower() for w in query.split()]
+    query_terms = [w for w in query_words if len(w) > 1 and w not in stopwords]
+    if not query_terms:
+        query_terms = [w for w in query_words if len(w) > 1]
+
     results = []
     for i, doc in enumerate(documents):
-        doc_terms = set(doc.lower().split())
-        overlap = len(query_terms & doc_terms)
-        score = overlap / max(len(query_terms), 1)
+        doc_lower = doc.lower()
+        # Score: weighted keyword matches + position bonus for early matches
+        match_count = 0
+        position_bonus = 0.0
+        for term in query_terms:
+            pos = doc_lower.find(term)
+            if pos >= 0:
+                match_count += 1
+                # Bonus for matches near the start of the chunk
+                position_bonus += max(0, 1.0 - pos / max(len(doc_lower), 1))
+        score = (match_count / max(len(query_terms), 1)) * 0.7 + (position_bonus / max(len(query_terms), 1)) * 0.3
         results.append({"index": i, "relevance_score": score})
     return results

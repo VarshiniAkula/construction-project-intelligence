@@ -358,12 +358,13 @@ def _embed_and_store(sb, document_id, project_id, chunks, visibility_scope, trad
     else:
         logger.info("Vercel serverless: skipping embeddings, keyword search available")
 
-    # Store chunks via PostgREST
+    # Store chunks via PostgREST — batch insert for speed
     chunk_ids = []
+    batch = []
     for i, chunk in enumerate(chunks):
         chunk_id = str(uuid.uuid4())
         chunk_ids.append(chunk_id)
-        sb.table("document_chunks").insert({
+        batch.append({
             "id": chunk_id,
             "document_id": document_id,
             "page_number": chunk["page_number"],
@@ -374,7 +375,9 @@ def _embed_and_store(sb, document_id, project_id, chunks, visibility_scope, trad
             "visibility_scope": visibility_scope,
             "trade_scope": trade_scope,
             "vector_id": chunk_id,
-        }).execute()
+        })
+    for b_start in range(0, len(batch), 50):
+        sb.table("document_chunks").insert(batch[b_start:b_start + 50]).execute()
 
     # Update embeddings via Supabase SQL HTTP API if we have them
     if embeddings:
@@ -454,11 +457,12 @@ def ingest_document_lightweight(document_id: str):
         chunks = _chunk_pages(pages_data, doc_type)
         logger.info(f"Created {len(chunks)} chunks for document {document_id}")
 
-        # Store chunks without embeddings (keyword search only)
+        # Store chunks without embeddings (keyword search only) — batch insert for speed
         if chunks:
+            batch = []
             for i, chunk in enumerate(chunks):
                 chunk_id = str(uuid.uuid4())
-                sb.table("document_chunks").insert({
+                batch.append({
                     "id": chunk_id,
                     "document_id": document_id,
                     "page_number": chunk["page_number"],
@@ -469,7 +473,10 @@ def ingest_document_lightweight(document_id: str):
                     "visibility_scope": visibility_scope,
                     "trade_scope": trade_scope,
                     "vector_id": chunk_id,
-                }).execute()
+                })
+            # Insert in batches of 50 to stay within PostgREST limits
+            for b_start in range(0, len(batch), 50):
+                sb.table("document_chunks").insert(batch[b_start:b_start + 50]).execute()
 
         sb.table("documents").update({"status": "ready"}).eq("id", document_id).execute()
         logger.info(f"Document {document_id} lightweight ingestion complete")
@@ -488,6 +495,7 @@ def _process_pdf_text_only(sb, document_id: str, project_id: str, file_data: byt
 
     doc = fitz.open(stream=file_data, filetype="pdf")
     pages_data = []
+    page_rows = []
 
     for page_num in range(len(doc)):
         page = doc.load_page(page_num)
@@ -497,14 +505,14 @@ def _process_pdf_text_only(sb, document_id: str, project_id: str, file_data: byt
         cleaned_text = raw_text.strip()
 
         page_id = str(uuid.uuid4())
-        sb.table("document_pages").insert({
+        page_rows.append({
             "id": page_id,
             "document_id": document_id,
             "page_number": page_num + 1,
             "raw_text": raw_text,
             "cleaned_text": cleaned_text,
             "page_summary": page_summary,
-        }).execute()
+        })
 
         pages_data.append({
             "page_number": page_num + 1,
@@ -514,6 +522,11 @@ def _process_pdf_text_only(sb, document_id: str, project_id: str, file_data: byt
         })
 
     doc.close()
+
+    # Batch insert pages for speed
+    for b_start in range(0, len(page_rows), 50):
+        sb.table("document_pages").insert(page_rows[b_start:b_start + 50]).execute()
+
     return pages_data
 
 

@@ -20,45 +20,54 @@ async def _keyword_fallback(
     """Fallback text search when embedding is unavailable (e.g. Vercel serverless)."""
     import re
     # Extract meaningful keywords, strip punctuation, skip stopwords
-    stopwords = {"the", "are", "what", "how", "does", "did", "for", "and", "this", "that", "with", "from", "have", "has", "been", "will", "can", "any", "all", "our", "about", "which", "when", "where", "who", "why"}
+    stopwords = {"the", "are", "what", "how", "does", "did", "for", "and", "this", "that", "with", "from", "have", "has", "been", "will", "can", "any", "all", "our", "about", "which", "when", "where", "who", "why", "is", "it", "in", "on", "at", "to", "of", "a", "an", "do", "was", "were", "not", "but", "or", "so", "if", "its", "my", "no", "yes", "just", "also", "than", "then", "into", "out", "up", "down", "new", "old", "most", "some", "each", "every", "other"}
     words = [re.sub(r'[^\w]', '', w).lower() for w in query.split()]
     words = [w for w in words if len(w) > 2 and w not in stopwords]
     if not words:
+        # If all words were filtered, use the original query words > 2 chars
+        words = [re.sub(r'[^\w]', '', w).lower() for w in query.split() if len(w) > 2]
+    if not words:
         return []
 
-    # Use the longest meaningful keyword for broad search
-    search_term = max(words, key=len)
-
-    q = (
-        sb.table("document_chunks")
-        .select("id, document_id, chunk_text, page_number, visibility_scope, trade_scope, doc_type")
-        .eq("document_id.project_id", project_id)  # won't work via PostgREST join
-    )
-
     # Direct query: get chunks for this project's documents
-    docs_result = await sb.table("documents").select("id, file_name, doc_type").eq("project_id", project_id).in_("visibility_scope", allowed_scopes).execute()
+    docs_result = await sb.table("documents").select("id, file_name, doc_type").eq("project_id", project_id).in_("visibility_scope", allowed_scopes).eq("status", "ready").execute()
     doc_map = {d["id"]: d for d in (docs_result.data or [])}
     doc_ids = list(doc_map.keys())
 
     if not doc_ids:
+        # Also try documents in any non-error status (chunking, processing, etc.)
+        docs_result = await sb.table("documents").select("id, file_name, doc_type").eq("project_id", project_id).in_("visibility_scope", allowed_scopes).execute()
+        doc_map = {d["id"]: d for d in (docs_result.data or [])}
+        doc_ids = list(doc_map.keys())
+
+    if not doc_ids:
         return []
 
-    result = await (
-        sb.table("document_chunks")
-        .select("id, document_id, chunk_text, page_number, visibility_scope, trade_scope, doc_type")
-        .in_("document_id", doc_ids)
-        .in_("visibility_scope", allowed_scopes)
-        .ilike("chunk_text", f"%{search_term}%")
-        .limit(limit)
-        .execute()
-    )
+    # Search with multiple keywords for better recall — try each keyword
+    all_rows = {}
+    search_terms = sorted(words, key=len, reverse=True)[:3]  # top 3 longest keywords
+    for term in search_terms:
+        try:
+            result = await (
+                sb.table("document_chunks")
+                .select("id, document_id, chunk_text, page_number, visibility_scope, trade_scope, doc_type")
+                .in_("document_id", doc_ids)
+                .in_("visibility_scope", allowed_scopes)
+                .ilike("chunk_text", f"%{term}%")
+                .limit(limit)
+                .execute()
+            )
+            for row in (result.data or []):
+                all_rows[row["id"]] = row
+        except Exception as e:
+            logger.warning(f"Keyword search for '{term}' failed: {e}")
 
     candidates = []
-    for row in (result.data or []):
+    for row in all_rows.values():
         doc = doc_map.get(row["document_id"], {})
-        # Simple relevance: count how many query words appear
+        # Relevance: count how many query words appear
         text_lower = row["chunk_text"].lower()
-        match_count = sum(1 for w in words if w.lower() in text_lower)
+        match_count = sum(1 for w in words if w in text_lower)
         score = match_count / max(len(words), 1)
 
         candidates.append({
