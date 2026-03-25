@@ -36,6 +36,14 @@ export default function DocumentsPage() {
         ...(docTypeFilter && { doc_type: docTypeFilter }),
         ...(statusFilter && { status: statusFilter }),
       }),
+    // Auto-refresh every 3s when any document is still processing
+    refetchInterval: (query) => {
+      const docs = query.state.data;
+      const hasProcessing = docs?.some((d: Document) =>
+        ["processing", "chunking", "embedding", "rendering_pages", "extracting_text", "vlm_processing"].includes(d.status)
+      );
+      return hasProcessing ? 3000 : false;
+    },
   });
 
   return (

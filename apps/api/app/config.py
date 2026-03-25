@@ -23,7 +23,7 @@ class Settings(BaseSettings):
 
     # --- Groq (free-tier LLM) ---
     GROQ_API_KEY: str = ""
-    GROQ_MODEL: str = "llama-3.3-70b-versatile"
+    GROQ_MODEL: str = "llama-3.1-8b-instant"
 
     # --- Anthropic (Claude) ---
     ANTHROPIC_API_KEY: str = ""

@@ -302,9 +302,10 @@ async def reprocess_document(
     trade_scope = doc.get("trade_scope") or ""
     doc_type = doc.get("doc_type", "general")
 
+    batch = []
     for i, chunk in enumerate(chunks):
         chunk_id = str(uuid.uuid4())
-        await sb.table("document_chunks").insert({
+        batch.append({
             "id": chunk_id,
             "document_id": document_id,
             "page_number": chunk["page_number"],
@@ -315,7 +316,10 @@ async def reprocess_document(
             "visibility_scope": visibility_scope,
             "trade_scope": trade_scope,
             "vector_id": chunk_id,
-        }).execute()
+        })
+    # Batch insert for speed
+    for b_start in range(0, len(batch), 50):
+        await sb.table("document_chunks").insert(batch[b_start:b_start + 50]).execute()
 
     # Mark document as ready
     await sb.table("documents").update({"status": "ready", "processing_error": None}).eq("id", document_id).execute()
