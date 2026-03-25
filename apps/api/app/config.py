@@ -19,7 +19,11 @@ class Settings(BaseSettings):
     BACKEND_CORS_ORIGINS: list[str] = ["http://localhost:3000"]
 
     # --- AI Provider Selection ---
-    LLM_PROVIDER: str = "anthropic"
+    LLM_PROVIDER: str = "groq"
+
+    # --- Groq (free-tier LLM) ---
+    GROQ_API_KEY: str = ""
+    GROQ_MODEL: str = "llama-3.3-70b-versatile"
 
     # --- Anthropic (Claude) ---
     ANTHROPIC_API_KEY: str = ""

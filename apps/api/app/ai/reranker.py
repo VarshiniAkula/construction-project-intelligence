@@ -1,5 +1,6 @@
 """Reranker client — supports local fastembed reranker or fallback scoring."""
 import logging
+import os
 from app.config import settings
 
 logger = logging.getLogger(__name__)
@@ -25,7 +26,12 @@ def _get_local_model():
 
 async def rerank_documents(query: str, documents: list[str], top_k: int = 5) -> list[dict]:
     if settings.RERANKER_PROVIDER == "local":
-        model = _get_local_model()
+        # On Vercel, skip fastembed entirely and use keyword fallback
+        if os.environ.get("VERCEL"):
+            logger.info("Running on Vercel; using keyword rerank fallback.")
+            model = "fallback"
+        else:
+            model = _get_local_model()
         if model == "fallback":
             # Simple keyword-overlap scoring as fallback
             results = _keyword_rerank(query, documents)

@@ -134,10 +134,18 @@ async def upload_document(
                          entity_type="document", entity_id=doc_id,
                          details={"file_name": doc["file_name"], "doc_type": doc_type})
 
-        # Dispatch background ingestion (best-effort on serverless)
+        # Dispatch ingestion: inline on Vercel (serverless), background otherwise
         try:
-            from app.services.ingestion import ingest_document
-            background_tasks.add_task(ingest_document, doc_id)
+            if os.environ.get("VERCEL"):
+                from app.services.ingestion import ingest_document_lightweight
+                ingest_document_lightweight(doc_id)
+                # Refresh doc status after inline ingestion
+                refreshed = await sb.table("documents").select("*").eq("id", doc_id).maybe_single().execute()
+                if refreshed and refreshed.data:
+                    doc = refreshed.data
+            else:
+                from app.services.ingestion import ingest_document
+                background_tasks.add_task(ingest_document, doc_id)
         except Exception as ing_err:
             logger.warning(f"Could not schedule ingestion: {ing_err}")
 
@@ -242,3 +250,74 @@ async def get_page_image(
 
     data = download_file(page["image_storage_key"])
     return StreamingResponse(io.BytesIO(data), media_type="image/png")
+
+
+@router.post("/projects/{project_id}/documents/{document_id}/reprocess")
+async def reprocess_document(
+    project_id: str,
+    document_id: str,
+    membership=Depends(get_project_membership),
+    user=Depends(get_current_user),
+    sb: AsyncClient = Depends(get_sb),
+):
+    """Synchronous reprocess: reads existing pages, creates chunks, marks document ready.
+
+    Useful for documents stuck at 'chunking' status due to serverless timeouts.
+    """
+    import logging
+    logger = logging.getLogger(__name__)
+
+    # Verify document exists and belongs to project
+    doc = _single(await sb.table("documents").select("*").eq("id", document_id).eq("project_id", project_id).maybe_single().execute())
+    if not doc:
+        raise HTTPException(status_code=404, detail="Document not found")
+
+    # Read existing pages
+    pages_result = await sb.table("document_pages").select("*").eq("document_id", document_id).order("page_number").execute()
+    pages = pages_result.data
+    if not pages:
+        raise HTTPException(status_code=400, detail="No pages found for document. Re-upload may be required.")
+
+    # Build pages_data in the format _chunk_pages expects
+    pages_data = [
+        {
+            "page_number": p["page_number"],
+            "raw_text": p.get("raw_text") or "",
+            "cleaned_text": p.get("cleaned_text") or "",
+            "summary": p.get("page_summary") or "",
+        }
+        for p in pages
+    ]
+
+    # Delete any existing chunks for this document (idempotent reprocess)
+    await sb.table("document_chunks").delete().eq("document_id", document_id).execute()
+
+    # Create chunks using the existing chunking logic
+    from app.services.ingestion import _chunk_pages
+    chunks = _chunk_pages(pages_data, doc.get("doc_type", "general"))
+    logger.info(f"Reprocess: created {len(chunks)} chunks for document {document_id}")
+
+    # Store chunks (no embeddings — keyword search only)
+    visibility_scope = doc.get("visibility_scope", "project_full")
+    trade_scope = doc.get("trade_scope") or ""
+    doc_type = doc.get("doc_type", "general")
+
+    for i, chunk in enumerate(chunks):
+        chunk_id = str(uuid.uuid4())
+        await sb.table("document_chunks").insert({
+            "id": chunk_id,
+            "document_id": document_id,
+            "page_number": chunk["page_number"],
+            "chunk_index": i,
+            "chunk_text": chunk["text"],
+            "doc_type": doc_type,
+            "metadata_json": {"chunk_type": chunk["chunk_type"]},
+            "visibility_scope": visibility_scope,
+            "trade_scope": trade_scope,
+            "vector_id": chunk_id,
+        }).execute()
+
+    # Mark document as ready
+    await sb.table("documents").update({"status": "ready", "processing_error": None}).eq("id", document_id).execute()
+
+    return {"status": "ready", "chunks_created": len(chunks)}

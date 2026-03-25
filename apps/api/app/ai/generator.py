@@ -1,9 +1,21 @@
-"""Answer generation client — supports Anthropic (Claude) and OpenAI-compatible models."""
-import json
+"""Answer generation client — supports Anthropic (Claude), Groq, and OpenAI-compatible models."""
+import logging
 from app.ai.provider import OpenAICompatibleProvider, AnthropicProvider
 from app.config import settings
 
+logger = logging.getLogger(__name__)
+
 _provider = None
+
+
+def _has_api_key() -> bool:
+    """Check whether an API key is configured for the active LLM provider."""
+    if settings.LLM_PROVIDER == "anthropic":
+        return bool(settings.ANTHROPIC_API_KEY)
+    elif settings.LLM_PROVIDER == "groq":
+        return bool(settings.GROQ_API_KEY)
+    else:
+        return bool(settings.LLM_API_KEY and settings.LLM_API_KEY != "not-needed")
 
 
 def get_generator_provider():
@@ -13,6 +25,13 @@ def get_generator_provider():
             _provider = AnthropicProvider(
                 api_key=settings.ANTHROPIC_API_KEY,
                 model=settings.ANTHROPIC_MODEL,
+                timeout=120.0,
+            )
+        elif settings.LLM_PROVIDER == "groq":
+            _provider = OpenAICompatibleProvider(
+                base_url="https://api.groq.com/openai/v1",
+                api_key=settings.GROQ_API_KEY,
+                model=settings.GROQ_MODEL,
                 timeout=120.0,
             )
         else:
@@ -54,11 +73,40 @@ def format_context(chunks: list[dict]) -> str:
     return "\n---\n".join(parts)
 
 
+def _build_fallback_answer(context_chunks: list[dict]) -> dict:
+    """Return a formatted response using raw document excerpts (no LLM)."""
+    if not context_chunks:
+        return {
+            "answer": "No relevant documents were found for your query.",
+            "model": "none",
+        }
+
+    parts = ["Based on the project documents, here are the most relevant excerpts:\n"]
+    for chunk in context_chunks:
+        file_name = chunk.get("file_name", "Unknown Document")
+        page = chunk.get("page_number", "?")
+        text = (chunk.get("text", "") or "").strip()
+        # Truncate very long chunks for readability
+        snippet = text[:500] + ("..." if len(text) > 500 else "")
+        parts.append(f"**From {file_name}, Page {page}:**\n> {snippet}\n")
+
+    parts.append("Note: AI summarization is not available. Showing raw document excerpts.")
+    return {
+        "answer": "\n".join(parts),
+        "model": "none",
+    }
+
+
 async def generate_answer(
     query: str,
     context_chunks: list[dict],
     chat_history: list[dict] | None = None,
 ) -> dict:
+    # If no API key is configured, skip the provider call entirely
+    if not _has_api_key():
+        logger.info("No API key configured for provider '%s'; returning raw excerpts.", settings.LLM_PROVIDER)
+        return _build_fallback_answer(context_chunks)
+
     provider = get_generator_provider()
     context = format_context(context_chunks)
 
@@ -81,14 +129,16 @@ Remember: Cite every claim with [Source N]. If evidence is insufficient, say so.
 
     try:
         answer = await provider.chat_completion(messages, temperature=0.1, max_tokens=2000)
-        model_name = settings.ANTHROPIC_MODEL if settings.LLM_PROVIDER == "anthropic" else settings.LLM_MODEL
+        if settings.LLM_PROVIDER == "anthropic":
+            model_name = settings.ANTHROPIC_MODEL
+        elif settings.LLM_PROVIDER == "groq":
+            model_name = settings.GROQ_MODEL
+        else:
+            model_name = settings.LLM_MODEL
         return {
             "answer": answer,
             "model": model_name,
         }
     except Exception as e:
-        return {
-            "answer": "I'm unable to generate an answer at this time. The language model service returned an error. Please try again later.",
-            "model": "error",
-            "error": str(e),
-        }
+        logger.warning("LLM call failed (%s); falling back to raw excerpts.", e)
+        return _build_fallback_answer(context_chunks)

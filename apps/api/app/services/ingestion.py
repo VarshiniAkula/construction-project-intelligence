@@ -408,6 +408,115 @@ def _update_embeddings_via_http(chunk_ids: list[str], embeddings: list[list[floa
                 logger.warning(f"Failed to update embedding for {chunk_id}: {e}")
 
 
+def ingest_document_lightweight(document_id: str):
+    """Lightweight ingestion designed to complete within 10s on Vercel serverless.
+
+    Skips page image rendering and embeddings entirely.
+    Does: text extraction -> page creation -> chunking -> chunk storage.
+    """
+    sb = _get_sb()
+
+    try:
+        result = sb.table("documents").select("*").eq("id", document_id).maybe_single().execute()
+        doc_row = result.data if result else None
+        if not doc_row:
+            logger.error(f"Document {document_id} not found")
+            return
+
+        project_id = doc_row["project_id"]
+        storage_key = doc_row["storage_key"]
+        file_type = storage_key.rsplit(".", 1)[-1] if "." in storage_key else "pdf"
+        doc_type = doc_row["doc_type"]
+        visibility_scope = doc_row["visibility_scope"]
+        trade_scope = doc_row.get("trade_scope") or ""
+
+        logger.info(f"Starting lightweight ingestion for document {document_id} ({file_type})")
+        sb.table("documents").update({"status": "processing"}).eq("id", document_id).execute()
+
+        file_data = download_file(storage_key)
+
+        # Process based on type — PDF uses text-only path (no pixmap rendering)
+        if file_type == "pdf":
+            pages_data = _process_pdf_text_only(sb, document_id, project_id, file_data)
+        elif file_type in ("png", "jpg", "jpeg"):
+            pages_data = _process_image(sb, document_id, project_id, file_data, file_type)
+        elif file_type == "docx":
+            pages_data = _process_docx(sb, document_id, file_data)
+        elif file_type in ("xlsx", "xls"):
+            pages_data = _process_xlsx(sb, document_id, file_data)
+        elif file_type == "csv":
+            pages_data = _process_csv(sb, document_id, file_data)
+        else:
+            raise ValueError(f"Unsupported file type: {file_type}")
+
+        sb.table("documents").update({"page_count": len(pages_data), "status": "chunking"}).eq("id", document_id).execute()
+
+        chunks = _chunk_pages(pages_data, doc_type)
+        logger.info(f"Created {len(chunks)} chunks for document {document_id}")
+
+        # Store chunks without embeddings (keyword search only)
+        if chunks:
+            for i, chunk in enumerate(chunks):
+                chunk_id = str(uuid.uuid4())
+                sb.table("document_chunks").insert({
+                    "id": chunk_id,
+                    "document_id": document_id,
+                    "page_number": chunk["page_number"],
+                    "chunk_index": i,
+                    "chunk_text": chunk["text"],
+                    "doc_type": doc_type,
+                    "metadata_json": {"chunk_type": chunk["chunk_type"]},
+                    "visibility_scope": visibility_scope,
+                    "trade_scope": trade_scope,
+                    "vector_id": chunk_id,
+                }).execute()
+
+        sb.table("documents").update({"status": "ready"}).eq("id", document_id).execute()
+        logger.info(f"Document {document_id} lightweight ingestion complete")
+
+    except Exception as e:
+        logger.error(f"Lightweight ingestion failed for {document_id}: {e}", exc_info=True)
+        try:
+            sb.table("documents").update({"status": "error", "processing_error": str(e)[:1000]}).eq("id", document_id).execute()
+        except Exception:
+            pass
+
+
+def _process_pdf_text_only(sb, document_id: str, project_id: str, file_data: bytes) -> list[dict]:
+    """Extract text from PDF without rendering page images (fast path for serverless)."""
+    import fitz
+
+    doc = fitz.open(stream=file_data, filetype="pdf")
+    pages_data = []
+
+    for page_num in range(len(doc)):
+        page = doc.load_page(page_num)
+        raw_text = page.get_text("text")
+
+        page_summary = raw_text[:500] if raw_text else ""
+        cleaned_text = raw_text.strip()
+
+        page_id = str(uuid.uuid4())
+        sb.table("document_pages").insert({
+            "id": page_id,
+            "document_id": document_id,
+            "page_number": page_num + 1,
+            "raw_text": raw_text,
+            "cleaned_text": cleaned_text,
+            "page_summary": page_summary,
+        }).execute()
+
+        pages_data.append({
+            "page_number": page_num + 1,
+            "raw_text": raw_text,
+            "cleaned_text": cleaned_text,
+            "summary": page_summary,
+        })
+
+    doc.close()
+    return pages_data
+
+
 def _get_embeddings(texts: list[str]) -> list[list[float]]:
     provider = os.environ.get("EMBEDDING_PROVIDER", settings.EMBEDDING_PROVIDER)
 
