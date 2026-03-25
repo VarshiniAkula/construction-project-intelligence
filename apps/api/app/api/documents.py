@@ -5,7 +5,7 @@ from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, UploadFi
 from fastapi.responses import StreamingResponse
 from supabase._async.client import AsyncClient
 
-from app.deps import get_sb, get_current_user, get_project_membership
+from app.deps import get_sb, get_current_user, get_project_membership, _single
 from app.schemas.document import DocumentResponse, DocumentDetailResponse, PageResponse
 from app.services.storage import upload_file, download_file
 from app.services.audit_service import log_action
@@ -64,9 +64,9 @@ async def list_documents(
     for d in docs:
         uploader_name = ""
         if d.get("uploaded_by"):
-            u_result = await sb.table("users").select("full_name").eq("id", d["uploaded_by"]).maybe_single().execute()
-            if u_result.data:
-                uploader_name = u_result.data["full_name"]
+            u = _single(await sb.table("users").select("full_name").eq("id", d["uploaded_by"]).maybe_single().execute())
+            if u:
+                uploader_name = u["full_name"]
         responses.append(DocumentResponse(
             id=d["id"], project_id=d["project_id"], file_name=d["file_name"],
             file_type=d["file_type"], doc_type=d["doc_type"],
@@ -165,8 +165,7 @@ async def get_document(
     sb: AsyncClient = Depends(get_sb),
 ):
     allowed_scopes = get_allowed_scopes(membership)
-    result = await sb.table("documents").select("*").eq("id", document_id).eq("project_id", project_id).in_("visibility_scope", allowed_scopes).maybe_single().execute()
-    doc = result.data
+    doc = _single(await sb.table("documents").select("*").eq("id", document_id).eq("project_id", project_id).in_("visibility_scope", allowed_scopes).maybe_single().execute())
     if not doc:
         raise HTTPException(status_code=404, detail="Document not found")
 
@@ -183,9 +182,9 @@ async def get_document(
 
     uploader_name = ""
     if doc.get("uploaded_by"):
-        u_result = await sb.table("users").select("full_name").eq("id", doc["uploaded_by"]).maybe_single().execute()
-        if u_result.data:
-            uploader_name = u_result.data["full_name"]
+        u = _single(await sb.table("users").select("full_name").eq("id", doc["uploaded_by"]).maybe_single().execute())
+        if u:
+            uploader_name = u["full_name"]
 
     return DocumentDetailResponse(
         id=doc["id"], project_id=doc["project_id"], file_name=doc["file_name"],
@@ -212,8 +211,7 @@ async def download_document(
     sb: AsyncClient = Depends(get_sb),
 ):
     allowed_scopes = get_allowed_scopes(membership)
-    result = await sb.table("documents").select("*").eq("id", document_id).eq("project_id", project_id).in_("visibility_scope", allowed_scopes).maybe_single().execute()
-    doc = result.data
+    doc = _single(await sb.table("documents").select("*").eq("id", document_id).eq("project_id", project_id).in_("visibility_scope", allowed_scopes).maybe_single().execute())
     if not doc:
         raise HTTPException(status_code=404, detail="Document not found")
 
@@ -234,12 +232,11 @@ async def get_page_image(
     sb: AsyncClient = Depends(get_sb),
 ):
     allowed_scopes = get_allowed_scopes(membership)
-    result = await sb.table("documents").select("id").eq("id", document_id).eq("project_id", project_id).in_("visibility_scope", allowed_scopes).maybe_single().execute()
-    if not result.data:
+    doc_check = _single(await sb.table("documents").select("id").eq("id", document_id).eq("project_id", project_id).in_("visibility_scope", allowed_scopes).maybe_single().execute())
+    if not doc_check:
         raise HTTPException(status_code=404, detail="Document not found")
 
-    page_result = await sb.table("document_pages").select("*").eq("document_id", document_id).eq("page_number", page_number).maybe_single().execute()
-    page = page_result.data
+    page = _single(await sb.table("document_pages").select("*").eq("document_id", document_id).eq("page_number", page_number).maybe_single().execute())
     if not page or not page.get("image_storage_key"):
         raise HTTPException(status_code=404, detail="Page image not found")
 

@@ -1,18 +1,59 @@
+import uuid
 from fastapi import APIRouter, Depends, HTTPException, Response, status
 from supabase._async.client import AsyncClient
 
-from app.deps import get_sb, get_current_user
-from app.schemas.auth import LoginRequest, TokenResponse, UserResponse
-from app.security.jwt import verify_password, create_access_token, create_refresh_token
+from app.deps import get_sb, get_current_user, _single
+from app.schemas.auth import LoginRequest, RegisterRequest, TokenResponse, UserResponse
+from app.security.jwt import verify_password, hash_password, create_access_token, create_refresh_token
 from app.services.audit_service import log_action
 
 router = APIRouter()
 
 
+@router.post("/register", response_model=TokenResponse, status_code=201)
+async def register(body: RegisterRequest, response: Response, sb: AsyncClient = Depends(get_sb)):
+    # Check if email already taken
+    existing = await sb.table("users").select("id").eq("email", body.email).execute()
+    if existing.data and len(existing.data) > 0:
+        raise HTTPException(status_code=400, detail="Email already registered")
+
+    try:
+        user_id = str(uuid.uuid4())
+        user_data = {
+            "id": user_id,
+            "email": body.email,
+            "password_hash": hash_password(body.password),
+            "full_name": body.full_name,
+            "company_name": body.company_name or "",
+            "is_active": True,
+            "is_superadmin": False,
+        }
+        await sb.table("users").insert(user_data).execute()
+
+        access_token = create_access_token(user_id)
+        refresh_token = create_refresh_token(user_id)
+
+        response.set_cookie(
+            key="access_token", value=access_token,
+            httponly=True, samesite="lax", max_age=43200,
+        )
+        response.set_cookie(
+            key="refresh_token", value=refresh_token,
+            httponly=True, samesite="lax", max_age=604800,
+        )
+
+        await log_action(sb, "auth.register", user_id=user_id)
+        return TokenResponse(access_token=access_token)
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Registration failed: {str(e)}")
+
+
 @router.post("/login", response_model=TokenResponse)
 async def login(body: LoginRequest, response: Response, sb: AsyncClient = Depends(get_sb)):
     result = await sb.table("users").select("*").eq("email", body.email).maybe_single().execute()
-    user = result.data
+    user = _single(result)
     if not user or not verify_password(body.password, user["password_hash"]):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid credentials")
     if not user.get("is_active"):

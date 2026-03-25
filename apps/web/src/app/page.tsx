@@ -119,7 +119,7 @@ export default function LandingPage() {
             >
               Sign In
             </Link>
-            <Link href="/login" className="btn-primary text-sm flex items-center gap-1.5">
+            <Link href="/register" className="btn-primary text-sm flex items-center gap-1.5">
               Get Started <ArrowRight className="w-4 h-4" />
             </Link>
           </div>
@@ -155,7 +155,7 @@ export default function LandingPage() {
 
           <div className="flex flex-col sm:flex-row gap-4 justify-center">
             <Link
-              href="/login"
+              href="/register"
               className="btn-primary text-base px-8 py-3.5 flex items-center justify-center gap-2 shadow-lg shadow-hard-hat/25"
             >
               Create Your Workspace <ChevronRight className="w-5 h-5" />
@@ -328,7 +328,7 @@ export default function LandingPage() {
               your first question — in under five minutes.
             </p>
             <Link
-              href="/login"
+              href="/register"
               className="btn-primary text-base px-10 py-4 inline-flex items-center gap-2 shadow-lg shadow-hard-hat/25"
             >
               Get Started Free <ArrowRight className="w-5 h-5" />

@@ -2,7 +2,7 @@ import uuid
 from fastapi import APIRouter, Depends, HTTPException
 from supabase._async.client import AsyncClient
 
-from app.deps import get_sb, get_current_user, get_project_membership
+from app.deps import get_sb, get_current_user, get_project_membership, _single
 from app.schemas.chat import (
     ChatSessionCreate, ChatSessionResponse,
     ChatMessageRequest, ChatMessageResponse, ChatAnswerResponse,
@@ -64,8 +64,7 @@ async def get_session_messages(
     user=Depends(get_current_user),
     sb: AsyncClient = Depends(get_sb),
 ):
-    session_result = await sb.table("chat_sessions").select("*").eq("id", session_id).maybe_single().execute()
-    session = session_result.data
+    session = _single(await sb.table("chat_sessions").select("*").eq("id", session_id).maybe_single().execute())
     if not session or session["project_id"] != project_id or session["user_id"] != user.id:
         raise HTTPException(status_code=404, detail="Session not found")
 
@@ -93,8 +92,7 @@ async def send_message(
     user=Depends(get_current_user),
     sb: AsyncClient = Depends(get_sb),
 ):
-    session_result = await sb.table("chat_sessions").select("*").eq("id", session_id).maybe_single().execute()
-    session = session_result.data
+    session = _single(await sb.table("chat_sessions").select("*").eq("id", session_id).maybe_single().execute())
     if not session or session["project_id"] != project_id or session["user_id"] != user.id:
         raise HTTPException(status_code=404, detail="Session not found")
 

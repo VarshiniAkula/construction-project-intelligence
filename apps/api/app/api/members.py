@@ -2,7 +2,7 @@ import uuid
 from fastapi import APIRouter, Depends, HTTPException, status
 from supabase._async.client import AsyncClient
 
-from app.deps import get_sb, get_current_user, get_project_membership
+from app.deps import get_sb, get_current_user, get_project_membership, _single
 from app.schemas.member import MemberAdd, MemberUpdate, MemberResponse
 from app.services.audit_service import log_action
 from app.shared_roles import ProjectRole, ROLE_PERMISSIONS
@@ -26,8 +26,7 @@ async def list_members(
     members = result.data
     responses = []
     for m in members:
-        u_result = await sb.table("users").select("email,full_name,company_name").eq("id", m["user_id"]).maybe_single().execute()
-        u = u_result.data
+        u = _single(await sb.table("users").select("email,full_name,company_name").eq("id", m["user_id"]).maybe_single().execute())
         responses.append(MemberResponse(
             id=m["id"], user_id=m["user_id"], project_id=m["project_id"],
             role=m["role"], assigned_trade=m.get("assigned_trade"),
@@ -49,13 +48,12 @@ async def add_member(
 ):
     _check_manage_permission(membership)
 
-    u_result = await sb.table("users").select("*").eq("email", body.email).maybe_single().execute()
-    target_user = u_result.data
+    target_user = _single(await sb.table("users").select("*").eq("email", body.email).maybe_single().execute())
     if not target_user:
         raise HTTPException(status_code=404, detail="User not found")
 
-    existing = await sb.table("project_memberships").select("id").eq("user_id", target_user["id"]).eq("project_id", project_id).maybe_single().execute()
-    if existing.data:
+    existing = _single(await sb.table("project_memberships").select("id").eq("user_id", target_user["id"]).eq("project_id", project_id).maybe_single().execute())
+    if existing:
         raise HTTPException(status_code=400, detail="Already a member")
 
     mem_data = {
@@ -90,8 +88,7 @@ async def update_member(
 ):
     _check_manage_permission(membership)
 
-    target_result = await sb.table("project_memberships").select("*").eq("id", membership_id).maybe_single().execute()
-    target = target_result.data
+    target = _single(await sb.table("project_memberships").select("*").eq("id", membership_id).maybe_single().execute())
     if not target or target["project_id"] != project_id:
         raise HTTPException(status_code=404, detail="Membership not found")
 
@@ -103,16 +100,13 @@ async def update_member(
 
     if updates:
         await sb.table("project_memberships").update(updates).eq("id", membership_id).execute()
-        # Re-fetch
-        target_result = await sb.table("project_memberships").select("*").eq("id", membership_id).maybe_single().execute()
-        target = target_result.data
+        target = _single(await sb.table("project_memberships").select("*").eq("id", membership_id).maybe_single().execute())
 
     await log_action(sb, "member.update", user_id=user.id, project_id=project_id,
                      entity_type="membership", entity_id=membership_id,
                      details={"changes": body.model_dump(exclude_none=True)})
 
-    u_result = await sb.table("users").select("email,full_name,company_name").eq("id", target["user_id"]).maybe_single().execute()
-    u = u_result.data
+    u = _single(await sb.table("users").select("email,full_name,company_name").eq("id", target["user_id"]).maybe_single().execute())
     return MemberResponse(
         id=target["id"], user_id=target["user_id"], project_id=target["project_id"],
         role=target["role"], assigned_trade=target.get("assigned_trade"),

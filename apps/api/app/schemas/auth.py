@@ -6,6 +6,13 @@ class LoginRequest(BaseModel):
     password: str
 
 
+class RegisterRequest(BaseModel):
+    email: str
+    password: str
+    full_name: str
+    company_name: str = ""
+
+
 class TokenResponse(BaseModel):
     access_token: str
     token_type: str = "bearer"

@@ -2,7 +2,7 @@ import uuid
 from fastapi import APIRouter, Depends, HTTPException, status
 from supabase._async.client import AsyncClient
 
-from app.deps import get_sb, get_current_user
+from app.deps import get_sb, get_current_user, _single
 from app.schemas.project import ProjectCreate, ProjectResponse
 from app.services.audit_service import log_action
 
@@ -27,8 +27,8 @@ async def list_projects(user=Depends(get_current_user), sb: AsyncClient = Depend
     for p in projects:
         mem_count = (await sb.table("project_memberships").select("id", count="exact").eq("project_id", p["id"]).execute()).count or 0
         doc_count = (await sb.table("documents").select("id", count="exact").eq("project_id", p["id"]).execute()).count or 0
-        my_mem = await sb.table("project_memberships").select("role").eq("project_id", p["id"]).eq("user_id", user.id).maybe_single().execute()
-        my_role = my_mem.data["role"] if my_mem.data else ("admin" if user.is_superadmin else None)
+        my_mem = _single(await sb.table("project_memberships").select("role").eq("project_id", p["id"]).eq("user_id", user.id).maybe_single().execute())
+        my_role = my_mem["role"] if my_mem else ("admin" if user.is_superadmin else None)
         responses.append(ProjectResponse(
             id=p["id"], name=p["name"], code=p["code"],
             location=p.get("location"), description=p.get("description"),
@@ -40,8 +40,8 @@ async def list_projects(user=Depends(get_current_user), sb: AsyncClient = Depend
 
 @router.post("", response_model=ProjectResponse, status_code=status.HTTP_201_CREATED)
 async def create_project(body: ProjectCreate, user=Depends(get_current_user), sb: AsyncClient = Depends(get_sb)):
-    existing = await sb.table("projects").select("id").eq("code", body.code).maybe_single().execute()
-    if existing.data:
+    existing = _single(await sb.table("projects").select("id").eq("code", body.code).maybe_single().execute())
+    if existing:
         raise HTTPException(status_code=400, detail="Project code already exists")
 
     project_id = str(uuid.uuid4())
@@ -63,20 +63,19 @@ async def create_project(body: ProjectCreate, user=Depends(get_current_user), sb
 
 @router.get("/{project_id}", response_model=ProjectResponse)
 async def get_project(project_id: str, user=Depends(get_current_user), sb: AsyncClient = Depends(get_sb)):
-    result = await sb.table("projects").select("*").eq("id", project_id).maybe_single().execute()
-    project = result.data
+    project = _single(await sb.table("projects").select("*").eq("id", project_id).maybe_single().execute())
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
 
     if not user.is_superadmin:
-        mem = await sb.table("project_memberships").select("id").eq("project_id", project_id).eq("user_id", user.id).maybe_single().execute()
-        if not mem.data:
+        mem = _single(await sb.table("project_memberships").select("id").eq("project_id", project_id).eq("user_id", user.id).maybe_single().execute())
+        if not mem:
             raise HTTPException(status_code=403, detail="Not a member")
 
     mem_count = (await sb.table("project_memberships").select("id", count="exact").eq("project_id", project_id).execute()).count or 0
     doc_count = (await sb.table("documents").select("id", count="exact").eq("project_id", project_id).execute()).count or 0
-    my_mem = await sb.table("project_memberships").select("role").eq("project_id", project_id).eq("user_id", user.id).maybe_single().execute()
-    my_role = my_mem.data["role"] if my_mem.data else ("admin" if user.is_superadmin else None)
+    my_mem = _single(await sb.table("project_memberships").select("role").eq("project_id", project_id).eq("user_id", user.id).maybe_single().execute())
+    my_role = my_mem["role"] if my_mem else ("admin" if user.is_superadmin else None)
 
     return ProjectResponse(
         id=project["id"], name=project["name"], code=project["code"],

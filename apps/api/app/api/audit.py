@@ -1,7 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException, Query
 from supabase._async.client import AsyncClient
 
-from app.deps import get_sb, get_current_user, get_project_membership
+from app.deps import get_sb, get_current_user, get_project_membership, _single
 from app.schemas.audit import AuditLogResponse
 from app.shared_roles import ProjectRole, ROLE_PERMISSIONS
 
@@ -34,8 +34,7 @@ async def list_audit_logs(
     for log in logs:
         log_user = None
         if log.get("user_id"):
-            u_result = await sb.table("users").select("email,full_name").eq("id", log["user_id"]).maybe_single().execute()
-            log_user = u_result.data
+            log_user = _single(await sb.table("users").select("email,full_name").eq("id", log["user_id"]).maybe_single().execute())
         responses.append(AuditLogResponse(
             id=log["id"],
             project_id=log.get("project_id"),

@@ -3,6 +3,7 @@ import uuid
 import logging
 from supabase._async.client import AsyncClient
 
+from app.deps import _single
 from app.rbac.filters import get_allowed_scopes
 from app.retrieval.hybrid_search import hybrid_retrieve
 from app.ai.generator import generate_answer
@@ -53,9 +54,9 @@ async def process_chat_message(
         doc_ids = list(set(c.get("document_id", "") for c in retrieved_chunks))
         doc_map = {}
         for doc_id in doc_ids:
-            result = await sb.table("documents").select("id,file_name").eq("id", doc_id).maybe_single().execute()
-            if result.data:
-                doc_map[doc_id] = result.data
+            doc_row = _single(await sb.table("documents").select("id,file_name").eq("id", doc_id).maybe_single().execute())
+            if doc_row:
+                doc_map[doc_id] = doc_row
 
         context_chunks = []
         for chunk in retrieved_chunks:
@@ -103,8 +104,8 @@ async def process_chat_message(
     assistant_msg = result.data[0]
 
     # Update session title if first message
-    session_result = await sb.table("chat_sessions").select("title").eq("id", session_id).maybe_single().execute()
-    if session_result.data and session_result.data["title"] == "New Chat":
+    session_row = _single(await sb.table("chat_sessions").select("title").eq("id", session_id).maybe_single().execute())
+    if session_row and session_row["title"] == "New Chat":
         await sb.table("chat_sessions").update({"title": content[:80]}).eq("id", session_id).execute()
 
     await log_action(

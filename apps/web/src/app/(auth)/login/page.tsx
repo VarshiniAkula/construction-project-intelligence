@@ -2,6 +2,7 @@
 
 import { useState } from "react";
 import { useRouter } from "next/navigation";
+import Link from "next/link";
 import { useAuth } from "@/lib/auth-context";
 import { HardHat } from "lucide-react";
 
@@ -34,7 +35,7 @@ export default function LoginPage() {
           <HardHat className="w-8 h-8 text-white" />
         </div>
         <h1 className="text-2xl font-bold text-white">Sign in to Construction RAG</h1>
-        <p className="text-gray-400 mt-1">Construction Document Intelligence</p>
+        <p className="text-gray-400 mt-1">Construction Project Intelligence</p>
       </div>
 
       <form onSubmit={handleSubmit} className="card p-8 space-y-5">
@@ -72,12 +73,12 @@ export default function LoginPage() {
           {loading ? "Signing in..." : "Sign In"}
         </button>
 
-        <div className="text-center pt-2">
-          <p className="text-xs text-hard-concrete">
-            Demo accounts: admin@builddocs.ai / sarah.pm@example.com / mike.super@example.com
-          </p>
-          <p className="text-xs text-hard-concrete">Password: builddocs123</p>
-        </div>
+        <p className="text-center text-sm text-hard-concrete pt-2">
+          Don&apos;t have an account?{" "}
+          <Link href="/register" className="text-hard-hat hover:text-orange-400 font-medium">
+            Create one
+          </Link>
+        </p>
       </form>
     </div>
   );

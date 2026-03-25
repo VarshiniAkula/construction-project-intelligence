@@ -12,6 +12,20 @@ def _row_to_ns(row: dict) -> SimpleNamespace:
     return SimpleNamespace(**row)
 
 
+def _single(result) -> dict | None:
+    """Safely extract a single row from a Supabase query result.
+    Works whether the result used maybe_single() or not, and handles
+    the case where maybe_single() returns None instead of an APIResponse."""
+    if result is None:
+        return None
+    data = getattr(result, "data", None)
+    if data is None:
+        return None
+    if isinstance(data, list):
+        return data[0] if data else None
+    return data  # already a dict from maybe_single()
+
+
 async def get_sb() -> AsyncClient:
     return await get_supabase()
 
@@ -34,7 +48,7 @@ async def get_current_user(
 
     user_id = payload.get("sub")
     result = await sb.table("users").select("*").eq("id", user_id).maybe_single().execute()
-    user = result.data
+    user = _single(result)
     if not user or not user.get("is_active"):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="User not found")
     return _row_to_ns(user)
@@ -55,7 +69,7 @@ async def get_project_membership(
         )
 
     result = await sb.table("project_memberships").select("*").eq("user_id", user.id).eq("project_id", project_id).maybe_single().execute()
-    membership = result.data
+    membership = _single(result)
     if not membership:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not a project member")
     return _row_to_ns(membership)

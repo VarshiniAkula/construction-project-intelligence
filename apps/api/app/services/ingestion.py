@@ -39,7 +39,7 @@ def ingest_document(document_id: str):
 
     try:
         result = sb.table("documents").select("*").eq("id", document_id).maybe_single().execute()
-        doc_row = result.data
+        doc_row = result.data if result else None
         if not doc_row:
             logger.error(f"Document {document_id} not found")
             return
