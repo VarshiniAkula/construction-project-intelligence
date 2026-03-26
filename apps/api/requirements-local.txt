@@ -1,0 +1,15 @@
+# Additional requirements for local development (heavy ML packages)
+# Install with: pip install -r requirements.txt -r requirements-local.txt
+
+# Full-featured PDF processing with image rendering
+pymupdf>=1.24
+
+# Local embeddings (ONNX, ~200MB with onnxruntime)
+fastembed>=0.4
+
+# Server
+uvicorn[standard]>=0.30
+
+# Testing
+pytest>=8.0
+pytest-asyncio>=0.24
