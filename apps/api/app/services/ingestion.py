@@ -490,38 +490,62 @@ def ingest_document_lightweight(document_id: str):
 
 
 def _process_pdf_text_only(sb, document_id: str, project_id: str, file_data: bytes) -> list[dict]:
-    """Extract text from PDF without rendering page images (fast path for serverless)."""
-    import fitz
-
-    doc = fitz.open(stream=file_data, filetype="pdf")
+    """Extract text from PDF without rendering page images (fast path for serverless).
+    Uses pypdf (lightweight) on Vercel, falls back to pymupdf if available."""
     pages_data = []
     page_rows = []
 
-    for page_num in range(len(doc)):
-        page = doc.load_page(page_num)
-        raw_text = page.get_text("text")
+    try:
+        # Try pypdf first (lightweight, available on Vercel)
+        from pypdf import PdfReader
+        reader = PdfReader(io.BytesIO(file_data))
 
-        page_summary = raw_text[:500] if raw_text else ""
-        cleaned_text = raw_text.strip()
+        for page_num, page in enumerate(reader.pages):
+            raw_text = page.extract_text() or ""
+            page_summary = raw_text[:500] if raw_text else ""
+            cleaned_text = raw_text.strip()
 
-        page_id = str(uuid.uuid4())
-        page_rows.append({
-            "id": page_id,
-            "document_id": document_id,
-            "page_number": page_num + 1,
-            "raw_text": raw_text,
-            "cleaned_text": cleaned_text,
-            "page_summary": page_summary,
-        })
+            page_id = str(uuid.uuid4())
+            page_rows.append({
+                "id": page_id,
+                "document_id": document_id,
+                "page_number": page_num + 1,
+                "raw_text": raw_text,
+                "cleaned_text": cleaned_text,
+                "page_summary": page_summary,
+            })
+            pages_data.append({
+                "page_number": page_num + 1,
+                "raw_text": raw_text,
+                "cleaned_text": cleaned_text,
+                "summary": page_summary,
+            })
+    except ImportError:
+        # Fall back to pymupdf if pypdf is not installed
+        import fitz
+        doc = fitz.open(stream=file_data, filetype="pdf")
+        for page_num in range(len(doc)):
+            page = doc.load_page(page_num)
+            raw_text = page.get_text("text")
+            page_summary = raw_text[:500] if raw_text else ""
+            cleaned_text = raw_text.strip()
 
-        pages_data.append({
-            "page_number": page_num + 1,
-            "raw_text": raw_text,
-            "cleaned_text": cleaned_text,
-            "summary": page_summary,
-        })
-
-    doc.close()
+            page_id = str(uuid.uuid4())
+            page_rows.append({
+                "id": page_id,
+                "document_id": document_id,
+                "page_number": page_num + 1,
+                "raw_text": raw_text,
+                "cleaned_text": cleaned_text,
+                "page_summary": page_summary,
+            })
+            pages_data.append({
+                "page_number": page_num + 1,
+                "raw_text": raw_text,
+                "cleaned_text": cleaned_text,
+                "summary": page_summary,
+            })
+        doc.close()
 
     # Batch insert pages for speed
     for b_start in range(0, len(page_rows), 50):

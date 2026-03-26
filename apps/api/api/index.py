@@ -2,6 +2,9 @@
 import sys
 import os
 
+# Mark that we're running on Vercel serverless
+os.environ["VERCEL"] = "1"
+
 # Add app directory to Python path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
