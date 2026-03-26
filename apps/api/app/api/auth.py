@@ -1,3 +1,4 @@
+import os
 import uuid
 from fastapi import APIRouter, Depends, HTTPException, Response, status
 from supabase._async.client import AsyncClient
@@ -8,6 +9,21 @@ from app.security.jwt import verify_password, hash_password, create_access_token
 from app.services.audit_service import log_action
 
 router = APIRouter()
+
+# Use secure cookies on HTTPS (production)
+_IS_PROD = bool(os.environ.get("VERCEL") or os.environ.get("RENDER"))
+
+
+def _set_auth_cookies(response: Response, access_token: str, refresh_token: str):
+    """Set auth cookies with proper flags for both dev and production."""
+    response.set_cookie(
+        key="access_token", value=access_token,
+        httponly=True, samesite="lax", secure=_IS_PROD, max_age=43200,
+    )
+    response.set_cookie(
+        key="refresh_token", value=refresh_token,
+        httponly=True, samesite="lax", secure=_IS_PROD, max_age=604800,
+    )
 
 
 @router.post("/register", response_model=TokenResponse, status_code=201)
@@ -32,15 +48,7 @@ async def register(body: RegisterRequest, response: Response, sb: AsyncClient = 
 
         access_token = create_access_token(user_id)
         refresh_token = create_refresh_token(user_id)
-
-        response.set_cookie(
-            key="access_token", value=access_token,
-            httponly=True, samesite="lax", max_age=43200,
-        )
-        response.set_cookie(
-            key="refresh_token", value=refresh_token,
-            httponly=True, samesite="lax", max_age=604800,
-        )
+        _set_auth_cookies(response, access_token, refresh_token)
 
         await log_action(sb, "auth.register", user_id=user_id)
         return TokenResponse(access_token=access_token)
@@ -61,15 +69,7 @@ async def login(body: LoginRequest, response: Response, sb: AsyncClient = Depend
 
     access_token = create_access_token(user["id"])
     refresh_token = create_refresh_token(user["id"])
-
-    response.set_cookie(
-        key="access_token", value=access_token,
-        httponly=True, samesite="lax", max_age=43200,
-    )
-    response.set_cookie(
-        key="refresh_token", value=refresh_token,
-        httponly=True, samesite="lax", max_age=604800,
-    )
+    _set_auth_cookies(response, access_token, refresh_token)
 
     await log_action(sb, "auth.login", user_id=user["id"])
     return TokenResponse(access_token=access_token)
