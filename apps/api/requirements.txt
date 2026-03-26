@@ -1,9 +1,11 @@
+# Core requirements — lightweight for Vercel serverless deployment
+# For local dev with full features (embeddings, pymupdf), also install requirements-local.txt
+
 # Web framework
 fastapi>=0.115,<1.0
-uvicorn[standard]>=0.30
 python-multipart>=0.0.9
 
-# Supabase client (replaces SQLAlchemy for DB access)
+# Supabase client
 supabase>=2.0
 
 # Validation / settings
@@ -15,19 +17,12 @@ python-jose[cryptography]>=3.3
 passlib[bcrypt]>=1.7
 bcrypt>=4.0,<5.0
 
-# PDF processing
-pymupdf>=1.24
+# PDF processing (lightweight — ~2MB)
+pypdf>=4.0
 
 # Document parsing
 python-docx>=1.0
 openpyxl>=3.1
 
-# HTTP client for AI endpoints + Supabase Storage
+# HTTP client
 httpx>=0.27
-
-# Lightweight local embeddings (ONNX, ~100MB vs 2GB for torch)
-fastembed>=0.4
-
-# Testing
-pytest>=8.0
-pytest-asyncio>=0.24
