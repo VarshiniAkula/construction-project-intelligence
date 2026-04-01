@@ -30,15 +30,10 @@ async def _keyword_fallback(
         return []
 
     # Direct query: get chunks for this project's documents
-    docs_result = await sb.table("documents").select("id, file_name, doc_type").eq("project_id", project_id).in_("visibility_scope", allowed_scopes).eq("status", "ready").execute()
+    # Search all non-error documents (ready, chunking, processing, uploaded)
+    docs_result = await sb.table("documents").select("id, file_name, doc_type").eq("project_id", project_id).in_("visibility_scope", allowed_scopes).neq("status", "error").execute()
     doc_map = {d["id"]: d for d in (docs_result.data or [])}
     doc_ids = list(doc_map.keys())
-
-    if not doc_ids:
-        # Also try documents in any non-error status (chunking, processing, etc.)
-        docs_result = await sb.table("documents").select("id, file_name, doc_type").eq("project_id", project_id).in_("visibility_scope", allowed_scopes).execute()
-        doc_map = {d["id"]: d for d in (docs_result.data or [])}
-        doc_ids = list(doc_map.keys())
 
     if not doc_ids:
         return []
@@ -61,6 +56,33 @@ async def _keyword_fallback(
                 all_rows[row["id"]] = row
         except Exception as e:
             logger.warning(f"Keyword search for '{term}' failed: {e}")
+
+    # Fallback: if no chunks found, search document_pages directly
+    # (handles documents stuck in chunking status that have pages but no chunks)
+    if not all_rows:
+        for term in search_terms:
+            try:
+                result = await (
+                    sb.table("document_pages")
+                    .select("id, document_id, raw_text, page_number")
+                    .in_("document_id", doc_ids)
+                    .ilike("raw_text", f"%{term}%")
+                    .limit(limit)
+                    .execute()
+                )
+                for row in (result.data or []):
+                    doc = doc_map.get(row["document_id"], {})
+                    all_rows[row["id"]] = {
+                        "id": row["id"],
+                        "document_id": row["document_id"],
+                        "chunk_text": row["raw_text"],
+                        "page_number": row.get("page_number", 0),
+                        "visibility_scope": "team",
+                        "trade_scope": None,
+                        "doc_type": doc.get("doc_type", "general"),
+                    }
+            except Exception as e:
+                logger.warning(f"Page search for '{term}' failed: {e}")
 
     candidates = []
     for row in all_rows.values():

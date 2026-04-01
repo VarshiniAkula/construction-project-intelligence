@@ -1,11 +1,26 @@
-"""Answer generation client — supports Anthropic (Claude), Groq, and OpenAI-compatible models."""
+"""Answer generation client — supports Anthropic (Claude), Groq, OpenAI-compatible models,
+and a smart extractive fallback when no API key is configured."""
 import logging
+import re
+import math
+from collections import Counter
 from app.ai.provider import OpenAICompatibleProvider, AnthropicProvider
 from app.config import settings
 
 logger = logging.getLogger(__name__)
 
 _provider = None
+
+# ── Stopwords for extractive Q&A ──
+_STOPWORDS = frozenset(
+    "a an the is are was were be been being have has had do does did will would "
+    "shall should may might can could of in to for on with at by from as into "
+    "through during before after above below between out off over under again "
+    "further then once here there when where why how all both each few more most "
+    "other some such no nor not only own same so than too very and but if or "
+    "because until while about what which who whom this that these those i me my "
+    "we our you your he him his she her it its they them their".split()
+)
 
 
 def _has_api_key() -> bool:
@@ -73,27 +88,142 @@ def format_context(chunks: list[dict]) -> str:
     return "\n---\n".join(parts)
 
 
-def _build_fallback_answer(context_chunks: list[dict]) -> dict:
-    """Return a formatted response using raw document excerpts (no LLM)."""
+# ── Smart Extractive Q&A (no LLM needed) ──
+
+def _tokenize(text: str) -> list[str]:
+    """Lowercase tokenize, strip non-alphanumeric."""
+    return [w for w in re.findall(r"[a-z0-9]+", text.lower()) if w not in _STOPWORDS and len(w) > 1]
+
+
+def _split_sentences(text: str) -> list[str]:
+    """Split text into sentences, keeping meaningful ones."""
+    raw = re.split(r'(?<=[.!?])\s+|\n+', text)
+    return [s.strip() for s in raw if len(s.strip()) > 20]
+
+
+def _build_extractive_answer(query: str, context_chunks: list[dict]) -> dict:
+    """Build a coherent answer by extracting and scoring the most relevant
+    sentences from context chunks against the user's query."""
     if not context_chunks:
         return {
             "answer": "No relevant documents were found for your query.",
-            "model": "none",
+            "model": "extractive",
         }
 
-    parts = ["Based on the project documents, here are the most relevant excerpts:\n"]
-    for chunk in context_chunks:
-        file_name = chunk.get("file_name", "Unknown Document")
-        page = chunk.get("page_number", "?")
-        text = (chunk.get("text", "") or "").strip()
-        # Truncate very long chunks for readability
-        snippet = text[:500] + ("..." if len(text) > 500 else "")
-        parts.append(f"**From {file_name}, Page {page}:**\n> {snippet}\n")
+    query_tokens = _tokenize(query)
+    if not query_tokens:
+        query_tokens = [w.lower() for w in query.split() if len(w) > 1]
 
-    parts.append("Note: AI summarization is not available. Showing raw document excerpts.")
+    # Build IDF from all sentences across chunks
+    all_sentences: list[tuple[str, int, dict]] = []  # (sentence, source_idx, chunk)
+    for idx, chunk in enumerate(context_chunks):
+        text = chunk.get("text", "") or ""
+        for sent in _split_sentences(text):
+            all_sentences.append((sent, idx + 1, chunk))
+
+    if not all_sentences:
+        # Chunks exist but no extractable sentences; show raw excerpts
+        parts = []
+        for i, chunk in enumerate(context_chunks, 1):
+            text = (chunk.get("text", "") or "").strip()[:400]
+            fname = chunk.get("file_name", "Unknown")
+            page = chunk.get("page_number", "?")
+            parts.append(f"From **{fname}** (Page {page}) [Source {i}]:\n> {text}")
+        return {
+            "answer": "\n\n".join(parts),
+            "model": "extractive",
+        }
+
+    # Compute IDF for query tokens across sentences
+    doc_freq: Counter = Counter()
+    for sent, _, _ in all_sentences:
+        sent_tokens = set(_tokenize(sent))
+        for qt in query_tokens:
+            if qt in sent_tokens:
+                doc_freq[qt] += 1
+
+    n_docs = len(all_sentences)
+    idf = {qt: math.log((n_docs + 1) / (doc_freq.get(qt, 0) + 1)) + 1.0 for qt in query_tokens}
+
+    # Score each sentence
+    scored: list[tuple[float, str, int, dict]] = []
+    for sent, src_idx, chunk in all_sentences:
+        sent_tokens = _tokenize(sent)
+        sent_token_set = set(sent_tokens)
+        if not sent_tokens:
+            continue
+
+        # TF-IDF-like score
+        score = 0.0
+        matches = 0
+        for qt in query_tokens:
+            if qt in sent_token_set:
+                tf = sent_tokens.count(qt) / len(sent_tokens)
+                score += tf * idf.get(qt, 1.0)
+                matches += 1
+
+        # Bonus for matching multiple query terms
+        if len(query_tokens) > 1:
+            coverage = matches / len(query_tokens)
+            score *= (1.0 + coverage)
+
+        # Bonus for chunk rerank score (from retrieval)
+        chunk_score = chunk.get("score", 0)
+        if chunk_score > 0:
+            score *= (1.0 + chunk_score * 0.5)
+
+        # Slight penalty for very short or very long sentences
+        if len(sent) < 40:
+            score *= 0.7
+        elif len(sent) > 500:
+            score *= 0.85
+
+        if score > 0:
+            scored.append((score, sent, src_idx, chunk))
+
+    if not scored:
+        # No query term matches; return top chunk excerpts
+        parts = ["Based on the project documents:\n"]
+        for i, chunk in enumerate(context_chunks[:3], 1):
+            text = (chunk.get("text", "") or "").strip()[:400]
+            fname = chunk.get("file_name", "Unknown")
+            page = chunk.get("page_number", "?")
+            parts.append(f"From **{fname}** (Page {page}) [Source {i}]:\n> {text}")
+        return {
+            "answer": "\n\n".join(parts),
+            "model": "extractive",
+        }
+
+    # Select top sentences (deduplicated)
+    scored.sort(key=lambda x: x[0], reverse=True)
+    selected: list[tuple[str, int, dict]] = []
+    seen_text: set[str] = set()
+    for _, sent, src_idx, chunk in scored:
+        normalized = sent.lower().strip()
+        if normalized not in seen_text and len(selected) < 8:
+            seen_text.add(normalized)
+            selected.append((sent, src_idx, chunk))
+
+    # Group by source for coherent presentation
+    source_groups: dict[int, list[str]] = {}
+    source_meta: dict[int, dict] = {}
+    for sent, src_idx, chunk in selected:
+        source_groups.setdefault(src_idx, []).append(sent)
+        source_meta[src_idx] = chunk
+
+    # Build answer
+    parts = ["Based on the project documents:\n"]
+    for src_idx in sorted(source_groups.keys()):
+        chunk = source_meta[src_idx]
+        fname = chunk.get("file_name", "Unknown")
+        page = chunk.get("page_number", "?")
+        sentences = source_groups[src_idx]
+        combined = " ".join(sentences)
+        parts.append(f"**{fname}** (Page {page}) [Source {src_idx}]: {combined}")
+
     return {
-        "answer": "\n".join(parts),
-        "model": "none",
+        "answer": "\n\n".join(parts),
+        "model": "extractive",
     }
 
 
@@ -102,10 +232,10 @@ async def generate_answer(
     context_chunks: list[dict],
     chat_history: list[dict] | None = None,
 ) -> dict:
-    # If no API key is configured, skip the provider call entirely
+    # If no API key is configured, use smart extractive Q&A
     if not _has_api_key():
-        logger.info("No API key configured for provider '%s'; returning raw excerpts.", settings.LLM_PROVIDER)
-        return _build_fallback_answer(context_chunks)
+        logger.info("No API key for '%s'; using extractive Q&A.", settings.LLM_PROVIDER)
+        return _build_extractive_answer(query, context_chunks)
 
     provider = get_generator_provider()
     context = format_context(context_chunks)
@@ -140,5 +270,5 @@ Remember: Cite every claim with [Source N]. If evidence is insufficient, say so.
             "model": model_name,
         }
     except Exception as e:
-        logger.warning("LLM call failed (%s); falling back to raw excerpts.", e)
-        return _build_fallback_answer(context_chunks)
+        logger.warning("LLM call failed (%s); falling back to extractive Q&A.", e)
+        return _build_extractive_answer(query, context_chunks)
