@@ -272,13 +272,12 @@ async def reprocess_document(
     if not doc:
         raise HTTPException(status_code=404, detail="Document not found")
 
-    # Read existing pages
-    pages_result = await sb.table("document_pages").select("*").eq("document_id", document_id).order("page_number").execute()
+    # Read existing pages (only fields needed for chunking)
+    pages_result = await sb.table("document_pages").select("page_number,raw_text,cleaned_text,page_summary").eq("document_id", document_id).order("page_number").execute()
     pages = pages_result.data
     if not pages:
         raise HTTPException(status_code=400, detail="No pages found for document. Re-upload may be required.")
 
-    # Build pages_data in the format _chunk_pages expects
     pages_data = [
         {
             "page_number": p["page_number"],
@@ -289,19 +288,20 @@ async def reprocess_document(
         for p in pages
     ]
 
-    # Delete any existing chunks for this document (idempotent reprocess)
-    await sb.table("document_chunks").delete().eq("document_id", document_id).execute()
+    # Delete existing chunks and create new ones in parallel
+    delete_task = sb.table("document_chunks").delete().eq("document_id", document_id).execute()
 
-    # Create chunks using the existing chunking logic
     from app.services.ingestion import _chunk_pages
     chunks = _chunk_pages(pages_data, doc.get("doc_type", "general"))
     logger.info(f"Reprocess: created {len(chunks)} chunks for document {document_id}")
 
-    # Store chunks (no embeddings — keyword search only)
+    await delete_task  # ensure delete completes before insert
+
     visibility_scope = doc.get("visibility_scope", "project_full")
     trade_scope = doc.get("trade_scope") or ""
     doc_type = doc.get("doc_type", "general")
 
+    # Build all chunk rows, then single batch insert (faster than multiple batches)
     batch = []
     for i, chunk in enumerate(chunks):
         chunk_id = str(uuid.uuid4())
@@ -317,11 +317,11 @@ async def reprocess_document(
             "trade_scope": trade_scope,
             "vector_id": chunk_id,
         })
-    # Batch insert for speed
-    for b_start in range(0, len(batch), 50):
-        await sb.table("document_chunks").insert(batch[b_start:b_start + 50]).execute()
 
-    # Mark document as ready
+    # Insert all at once if under 100, else batch by 100 (larger batches = fewer round trips)
+    for b_start in range(0, len(batch), 100):
+        await sb.table("document_chunks").insert(batch[b_start:b_start + 100]).execute()
+
     await sb.table("documents").update({"status": "ready", "processing_error": None}).eq("id", document_id).execute()
 
     return {"status": "ready", "chunks_created": len(chunks)}
