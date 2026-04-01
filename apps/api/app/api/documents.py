@@ -260,68 +260,74 @@ async def reprocess_document(
     user=Depends(get_current_user),
     sb: AsyncClient = Depends(get_sb),
 ):
-    """Synchronous reprocess: reads existing pages, creates chunks, marks document ready.
-
-    Useful for documents stuck at 'chunking' status due to serverless timeouts.
-    """
+    """Reprocess: reads existing pages, creates chunks, marks document ready."""
     import logging
+    import traceback
     logger = logging.getLogger(__name__)
 
-    # Verify document exists and belongs to project
-    doc = _single(await sb.table("documents").select("*").eq("id", document_id).eq("project_id", project_id).maybe_single().execute())
-    if not doc:
-        raise HTTPException(status_code=404, detail="Document not found")
+    try:
+        doc = _single(await sb.table("documents").select("id,doc_type,visibility_scope,trade_scope").eq("id", document_id).eq("project_id", project_id).maybe_single().execute())
+        if not doc:
+            raise HTTPException(status_code=404, detail="Document not found")
 
-    # Read existing pages
-    pages_result = await sb.table("document_pages").select("*").eq("document_id", document_id).order("page_number").execute()
-    pages = pages_result.data
-    if not pages:
-        raise HTTPException(status_code=400, detail="No pages found for document. Re-upload may be required.")
+        logger.info(f"Reprocess start: {document_id}")
 
-    # Build pages_data in the format _chunk_pages expects
-    pages_data = [
-        {
-            "page_number": p["page_number"],
-            "raw_text": p.get("raw_text") or "",
-            "cleaned_text": p.get("cleaned_text") or "",
-            "summary": p.get("page_summary") or "",
-        }
-        for p in pages
-    ]
+        pages_result = await sb.table("document_pages").select("page_number,raw_text,cleaned_text,page_summary").eq("document_id", document_id).order("page_number").execute()
+        pages = pages_result.data
+        if not pages:
+            raise HTTPException(status_code=400, detail="No pages found for document. Re-upload may be required.")
 
-    # Delete any existing chunks for this document (idempotent reprocess)
-    await sb.table("document_chunks").delete().eq("document_id", document_id).execute()
+        logger.info(f"Reprocess: read {len(pages)} pages")
 
-    # Create chunks using the existing chunking logic
-    from app.services.ingestion import _chunk_pages
-    chunks = _chunk_pages(pages_data, doc.get("doc_type", "general"))
-    logger.info(f"Reprocess: created {len(chunks)} chunks for document {document_id}")
+        pages_data = [
+            {
+                "page_number": p["page_number"],
+                "raw_text": p.get("raw_text") or "",
+                "cleaned_text": p.get("cleaned_text") or "",
+                "summary": p.get("page_summary") or "",
+            }
+            for p in pages
+        ]
 
-    # Store chunks (no embeddings — keyword search only)
-    visibility_scope = doc.get("visibility_scope", "project_full")
-    trade_scope = doc.get("trade_scope") or ""
-    doc_type = doc.get("doc_type", "general")
+        # Delete existing chunks
+        await sb.table("document_chunks").delete().eq("document_id", document_id).execute()
+        logger.info("Reprocess: deleted old chunks")
 
-    batch = []
-    for i, chunk in enumerate(chunks):
-        chunk_id = str(uuid.uuid4())
-        batch.append({
-            "id": chunk_id,
-            "document_id": document_id,
-            "page_number": chunk["page_number"],
-            "chunk_index": i,
-            "chunk_text": chunk["text"],
-            "doc_type": doc_type,
-            "metadata_json": {"chunk_type": chunk["chunk_type"]},
-            "visibility_scope": visibility_scope,
-            "trade_scope": trade_scope,
-            "vector_id": chunk_id,
-        })
-    # Batch insert for speed
-    for b_start in range(0, len(batch), 50):
-        await sb.table("document_chunks").insert(batch[b_start:b_start + 50]).execute()
+        from app.services.ingestion import _chunk_pages
+        chunks = _chunk_pages(pages_data, doc.get("doc_type", "general"))
+        logger.info(f"Reprocess: created {len(chunks)} chunks")
 
-    # Mark document as ready
-    await sb.table("documents").update({"status": "ready", "processing_error": None}).eq("id", document_id).execute()
+        visibility_scope = doc.get("visibility_scope", "project_full")
+        trade_scope = doc.get("trade_scope") or ""
+        doc_type = doc.get("doc_type", "general")
 
-    return {"status": "ready", "chunks_created": len(chunks)}
+        batch = []
+        for i, chunk in enumerate(chunks):
+            chunk_id = str(uuid.uuid4())
+            batch.append({
+                "id": chunk_id,
+                "document_id": document_id,
+                "page_number": chunk["page_number"],
+                "chunk_index": i,
+                "chunk_text": chunk["text"],
+                "doc_type": doc_type,
+                "metadata_json": {"chunk_type": chunk["chunk_type"]},
+                "visibility_scope": visibility_scope,
+                "trade_scope": trade_scope,
+                "vector_id": chunk_id,
+            })
+
+        for b_start in range(0, len(batch), 50):
+            await sb.table("document_chunks").insert(batch[b_start:b_start + 50]).execute()
+            logger.info(f"Reprocess: inserted batch {b_start}-{b_start+50}")
+
+        await sb.table("documents").update({"status": "ready", "processing_error": None}).eq("id", document_id).execute()
+        logger.info(f"Reprocess complete: {document_id}")
+
+        return {"status": "ready", "chunks_created": len(chunks)}
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Reprocess failed: {e}\n{traceback.format_exc()}")
+        raise HTTPException(status_code=500, detail=f"Reprocess failed: {str(e)[:500]}")
