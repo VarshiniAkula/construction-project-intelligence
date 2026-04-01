@@ -1,6 +1,40 @@
 # BuildDocs AI
 
-**Role-aware construction document chatbot.** Upload project documents (drawings, specs, RFIs, submittals, daily reports, meeting minutes, safety docs, change orders), index them with AI, and chat with them. Every answer is grounded in your project documents with citations. Access control ensures each role sees only what they should.
+**Role-aware construction document intelligence platform.** Upload project documents (drawings, specs, RFIs, submittals, daily reports, meeting minutes, safety docs, change orders), process them automatically, and chat with them. Every answer is grounded in your project documents with citations. Role-based access control ensures each team member sees only what they should.
+
+**Live:** [constructionrag.vercel.app](https://constructionrag.vercel.app) | **API:** [builddocs-api.vercel.app](https://builddocs-api.vercel.app)
+
+---
+
+## Tech Stack
+
+### Frontend
+- **Next.js 15** with App Router
+- **React 19** + TypeScript
+- **Tailwind CSS** + **shadcn/ui** (Radix UI primitives)
+- **TanStack Query v5** for server state management
+- **React Hook Form** + **Zod** for form validation
+- **react-pdf** for in-browser PDF viewing
+- **react-dropzone** for drag-and-drop document uploads
+
+### Backend
+- **FastAPI** (Python) — async REST API
+- **Supabase** — PostgreSQL database + file storage + auth via PostgREST
+- **Pydantic v2** + **pydantic-settings** for config and validation
+- **pypdf** for lightweight PDF text extraction (serverless-compatible)
+- **python-docx** / **openpyxl** for Word and Excel parsing
+- **httpx** for async HTTP
+
+### AI & RAG Pipeline
+- **Groq** (free-tier LLM) — `llama-3.1-8b-instant` for chat answers
+- **Smart Extractive Q&A** — TF-IDF sentence scoring fallback (no API key needed)
+- **Keyword-based retrieval** with multi-term search and relevance scoring
+- **Keyword reranker** with position-aware scoring
+- Supports **Anthropic Claude** and **OpenAI-compatible** endpoints as alternatives
+
+### Deployment
+- **Vercel** — serverless deployment for both frontend and Python API
+- **Supabase** — managed PostgreSQL + object storage (no self-hosted infra needed)
 
 ---
 
@@ -8,77 +42,114 @@
 
 ```
 apps/
-  web/       Next.js 15 + Tailwind + shadcn/ui      (port 3000)
-  api/       FastAPI + SQLAlchemy 2 + Alembic        (port 8000)
-  worker/    Celery worker for document ingestion
-packages/
-  shared/    Shared types, RBAC definitions (TS + Python)
-infra/       Dockerfiles, docker-compose, seed script
-e2e/         Playwright end-to-end tests
+  web/          Next.js 15 + Tailwind + shadcn/ui        (Vercel)
+  api/          FastAPI + Supabase + RAG pipeline         (Vercel Python)
 ```
 
-**AI Stack (non-negotiable):**
-- Final answers: `mistralai/Mistral-Small-3.2-24B-Instruct-2506`
-- Ingestion VLM: `Qwen/Qwen2.5-VL-7B-Instruct`
-- Embeddings: `BAAI/bge-m3` (1024-dim)
-- Reranker: `BAAI/bge-reranker-v2-m3`
-
-**Infrastructure:** PostgreSQL, Redis, Qdrant, MinIO
+```
+Browser  -->  Next.js (Vercel)  --rewrites-->  FastAPI (Vercel Serverless)
+                                                   |
+                                               Supabase
+                                            (PostgreSQL + Storage)
+                                                   |
+                                            Groq / Extractive Q&A
+```
 
 ---
 
 ## Quick Start
 
-### Prerequisites
-- Docker & Docker Compose
+### Option 1: Use the deployed app
 
-### 1. Clone and configure
+1. Go to [constructionrag.vercel.app](https://constructionrag.vercel.app)
+2. Register an account
+3. Create a project
+4. Upload construction documents (PDF, DOCX, XLSX, CSV)
+5. Chat with your documents
+
+### Option 2: Local development
+
+#### Prerequisites
+- Python 3.12+
+- Node.js 20+
+- A Supabase project (free tier works)
+
+#### 1. Clone and configure
 ```bash
+git clone <repo-url>
 cd construction-project-intelligence
 cp .env.example .env
-# Edit .env to set AI model endpoints if you have them running
+# Edit .env with your Supabase credentials
 ```
 
-### 2. Start all services
+#### 2. Start the API
 ```bash
-docker compose up --build
+cd apps/api
+pip install -r requirements.txt -r requirements-local.txt
+uvicorn app.main:app --reload --port 8000
 ```
 
-This starts: PostgreSQL, Redis, Qdrant, MinIO, API, Worker, Web
-
-### 3. Run database migrations and seed data
+#### 3. Start the frontend
 ```bash
-# Migrations run automatically on API startup
-
-# Seed demo data
-docker compose exec api python /app/../infra/scripts/seed.py
-# Or run locally:
-cd infra/scripts && python seed.py
+cd apps/web
+npm install
+npm run dev
 ```
 
-### 4. Open the app
+#### 4. Open the app
 - **Web UI:** http://localhost:3000
 - **API docs:** http://localhost:8000/docs
-- **MinIO console:** http://localhost:9001 (minioadmin/minioadmin)
-- **Qdrant dashboard:** http://localhost:6333/dashboard
 
 ---
 
-## Demo Accounts
+## Environment Variables
 
-All passwords: `builddocs123`
+### Required (API)
 
-| Email | Role | Access |
-|-------|------|--------|
-| `admin@builddocs.ai` | Admin | Full platform access |
-| `sarah.pm@example.com` | Project Manager | Full project access |
-| `mike.super@example.com` | Superintendent | Field docs, no management_only |
-| `jose.electrical@example.com` | Subcontractor | Electrical trade docs only |
-| `owner@riverside.com` | Owner / Viewer | Read-only, owner_shared docs only |
+| Variable | Description |
+|----------|-------------|
+| `SUPABASE_URL` | Your Supabase project URL |
+| `SUPABASE_SERVICE_KEY` | Supabase service role key |
+| `SECRET_KEY` | JWT signing secret (random 64-char string) |
+
+### Optional (AI)
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `LLM_PROVIDER` | `groq` | LLM provider: `groq`, `anthropic`, or `openai` |
+| `GROQ_API_KEY` | — | Free API key from [console.groq.com](https://console.groq.com) |
+| `GROQ_MODEL` | `llama-3.1-8b-instant` | Groq model to use |
+| `EMBEDDING_PROVIDER` | `local` | `local` (fastembed) or `api` |
+
+> Without a `GROQ_API_KEY`, chat uses smart extractive Q&A — TF-IDF sentence scoring that extracts and ranks the most relevant sentences from your documents. It works well for factual lookups.
 
 ---
 
-## MVP Roles & Access Control
+## Document Ingestion Pipeline
+
+1. Upload file to Supabase Storage
+2. Create document record (status: `processing`)
+3. Extract text — **pypdf** for PDFs, **python-docx** for Word, **openpyxl** for Excel
+4. Create document pages with extracted text
+5. Type-aware chunking (drawings, specs, RFIs, daily reports, general)
+6. Store chunks in PostgreSQL with metadata (batch inserts for speed)
+7. Mark document as `ready`
+
+Optimized for Vercel's 10-second serverless limit with batch inserts (50 at a time) and lightweight dependencies (~15MB bundle vs 350MB+ with ML libraries).
+
+## Chat / RAG Pipeline
+
+1. Authenticate user, resolve project role + trade scope
+2. Build keyword search filters (project + allowed visibility scopes)
+3. Multi-keyword search across document chunks (top 3 longest query terms)
+4. Falls back to document pages if no chunks exist
+5. Rerank candidates with position-aware keyword scoring
+6. Generate answer with Groq LLM or extractive Q&A fallback
+7. Return answer + citations + confidence score
+
+---
+
+## Roles & Access Control
 
 | Role | Visibility Scopes | Upload | Chat | Manage Members |
 |------|-------------------|--------|------|----------------|
@@ -88,47 +159,7 @@ All passwords: `builddocs123`
 | Subcontractor | field_team, trade_scoped (own trade) | Submittals, RFIs, general | Own trade docs | No |
 | Owner / Viewer | owner_shared | None | owner_shared docs | No |
 
-**Critical rule:** Restricted documents are never leaked. If a user asks about content in inaccessible docs, the system responds that there is not enough accessible documentation.
-
----
-
-## Document Ingestion Pipeline
-
-1. Upload file to MinIO
-2. Create document record (status: `processing`)
-3. Render PDF pages to images (PyMuPDF)
-4. Extract raw text
-5. VLM page understanding (Qwen2.5-VL) for scanned pages, drawings, tables
-6. Produce structured metadata (doc_type, title, revision, trade, etc.)
-7. Type-aware chunking (drawings, specs, RFIs, reports, general)
-8. Generate BGE-M3 embeddings
-9. Upsert to Qdrant with metadata payload
-10. Mark document as `ready`
-
-## Chat / RAG Pipeline
-
-1. Authenticate user, resolve project role + trade
-2. Build Qdrant filter (project + allowed scopes + trade)
-3. Embed query with BGE-M3
-4. Hybrid search: dense retrieval, top-20 candidates
-5. Rerank with BGE-reranker-v2-m3, top-5
-6. Generate answer with Mistral-Small-3.2 (strict grounding prompt)
-7. Return answer + citations + confidence
-
----
-
-## AI Model Endpoints
-
-All models use OpenAI-compatible endpoints. Configure in `.env`:
-
-```env
-LLM_BASE_URL=http://your-mistral-server:8081/v1
-VLM_BASE_URL=http://your-qwen-vl-server:8082/v1
-EMBEDDING_BASE_URL=http://your-embedding-server:8083/v1
-RERANKER_BASE_URL=http://your-reranker-server:8084/v1
-```
-
-You can use vLLM, text-generation-inference, text-embeddings-inference, or any OpenAI-compatible server.
+Restricted documents are never leaked. If a user asks about content in inaccessible docs, the system responds that there is not enough accessible documentation.
 
 ---
 
@@ -136,44 +167,26 @@ You can use vLLM, text-generation-inference, text-embeddings-inference, or any O
 
 | Method | Path | Description |
 |--------|------|-------------|
-| POST | `/api/auth/login` | Login |
+| POST | `/api/auth/register` | Register new user |
+| POST | `/api/auth/login` | Login (sets httponly cookies) |
 | POST | `/api/auth/logout` | Logout |
-| GET | `/api/auth/me` | Current user |
+| GET | `/api/auth/me` | Current user info |
 | GET | `/api/projects` | List projects |
 | POST | `/api/projects` | Create project |
 | GET | `/api/projects/{id}` | Project detail |
 | GET | `/api/projects/{id}/members` | List members |
 | POST | `/api/projects/{id}/members` | Add member |
-| PATCH | `/api/projects/{id}/members/{mid}` | Update member |
+| PATCH | `/api/projects/{id}/members/{mid}` | Update member role |
 | GET | `/api/projects/{id}/documents` | List documents (RBAC-filtered) |
 | POST | `/api/projects/{id}/documents/upload` | Upload document |
-| GET | `/api/projects/{id}/documents/{did}` | Document detail |
-| GET | `/api/projects/{id}/documents/{did}/download` | Download |
-| GET | `/api/projects/{id}/documents/{did}/pages/{pn}/image` | Page image |
+| GET | `/api/projects/{id}/documents/{did}` | Document detail + pages |
+| GET | `/api/projects/{id}/documents/{did}/download` | Download original file |
+| POST | `/api/projects/{id}/documents/{did}/reprocess` | Reprocess stuck document |
 | GET | `/api/projects/{id}/chat/sessions` | List chat sessions |
-| POST | `/api/projects/{id}/chat/sessions` | Create session |
+| POST | `/api/projects/{id}/chat/sessions` | Create chat session |
 | GET | `/api/projects/{id}/chat/sessions/{sid}` | Session messages |
-| POST | `/api/projects/{id}/chat/sessions/{sid}/messages` | Send message |
+| POST | `/api/projects/{id}/chat/sessions/{sid}/messages` | Send message (RAG) |
 | GET | `/api/projects/{id}/audit` | Audit log |
-
----
-
-## Testing
-
-### Backend tests
-```bash
-cd apps/api
-pip install -r requirements.txt
-pytest tests/ -v
-```
-
-### E2E tests
-```bash
-cd e2e
-npm install
-npx playwright install
-npx playwright test
-```
 
 ---
 
@@ -181,58 +194,42 @@ npx playwright test
 
 ```
 apps/api/
+  api/index.py               Vercel serverless entry point
   app/
-    main.py              FastAPI app
-    config.py            Pydantic settings
-    deps.py              Dependency injection
-    models/              SQLAlchemy models
-    schemas/             Pydantic schemas
-    api/                 Route handlers
-    services/            Business logic
-    ai/                  AI provider adapters
-    retrieval/           Qdrant + hybrid search
-    rbac/                Role-based access control
-  alembic/               Database migrations
-  tests/                 Pytest tests
-
-apps/worker/
-  worker/
-    celery_app.py        Celery configuration
-    tasks/ingest.py      Document ingestion pipeline
-    shared/              DB, MinIO, Qdrant clients
+    main.py                  FastAPI app + CORS
+    config.py                Pydantic settings
+    deps.py                  Dependency injection (Supabase client, auth)
+    api/                     Route handlers (auth, projects, documents, chat)
+    schemas/                 Pydantic request/response models
+    services/                Business logic (ingestion, chat, storage, audit)
+    ai/                      LLM providers, embeddings, reranker, generator
+    retrieval/               Hybrid search (keyword + vector)
+    rbac/                    Role-based access control filters
+    shared_roles.py          Role/permission definitions
+  requirements.txt           Lightweight deps for Vercel (<50MB)
+  requirements-local.txt     Heavy ML deps for local dev (fastembed, pymupdf)
+  vercel.json                Vercel build config
 
 apps/web/
   src/
-    app/                 Next.js App Router pages
-    components/          React components
-    lib/                 API client, auth, utils
-    hooks/               TanStack Query hooks
-
-packages/shared/
-  python/roles.py        Shared role/visibility definitions
+    app/                     Next.js App Router pages
+    components/              React + shadcn/ui components
+    lib/                     API client, auth helpers, utils
+    hooks/                   TanStack Query data-fetching hooks
+  next.config.ts             API rewrites to backend
 ```
 
 ---
 
-## Development
+## Development Notes
 
-### Local development without Docker
-```bash
-# Start infrastructure
-docker compose up postgres redis qdrant minio minio-init -d
+### Requirements split
+- `requirements.txt` — lightweight for Vercel serverless (pypdf, ~15MB bundle)
+- `requirements-local.txt` — full-featured local dev (pymupdf, fastembed, uvicorn, pytest)
 
-# API
-cd apps/api
-pip install -r requirements.txt
-alembic upgrade head
-uvicorn app.main:app --reload --port 8000
+### Auth
+- Cookie-based JWT with `httponly`, `samesite=lax`, `secure=true` in production
+- Access tokens (12h) + refresh tokens (7d)
 
-# Worker
-cd apps/worker
-celery -A worker.celery_app worker --loglevel=info
-
-# Frontend
-cd apps/web
-npm install
-npm run dev
-```
+### Supported file types
+PDF, DOCX, XLSX, CSV, PNG, JPG
