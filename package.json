@@ -1,0 +1,14 @@
+{
+  "name": "construction-project-intelligence",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "dev": "pnpm --filter builddocs-web dev",
+    "build": "pnpm --filter builddocs-web build",
+    "lint": "pnpm --filter builddocs-web lint"
+  },
+  "packageManager": "pnpm@10.33.0",
+  "engines": {
+    "node": ">=20"
+  }
+}
