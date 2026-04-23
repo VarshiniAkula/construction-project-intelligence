@@ -1,5 +1,6 @@
 import type { NextConfig } from "next";
 
+// deployment verification trigger
 const nextConfig: NextConfig = {
   webpack: (config) => {
     config.resolve.alias.canvas = false;
